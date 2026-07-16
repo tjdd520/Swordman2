@@ -10,7 +10,9 @@ namespace Swordman2.Combat
         {
             if (Object.FindAnyObjectByType<CombatDirector>() != null) return;
 
-            Application.targetFrameRate = 120;
+            if (!CombatCatalogLoader.TryLoad(out CombatCatalogData catalog)) return;
+
+            Application.targetFrameRate = catalog.settings.logicFrameRate;
             QualitySettings.vSyncCount = 0;
             RemoveTemplateCamera();
             BuildArena();
@@ -19,25 +21,25 @@ namespace Swordman2.Combat
             AnimationClip[] clips = Resources.LoadAll<AnimationClip>("Models/Swordsman");
             if (model == null)
                 Debug.LogError("无法加载 Resources/Models/Swordsman.fbx，将显示后备胶囊体。");
-            ValidateClips(clips);
+            ValidateClips(clips, catalog);
 
             FighterController playerOne = new FighterController(1, new Vector3(-1.45f, 0f, 0f),
-                new Color(0.22f, 0.55f, 1f), model, clips);
+                new Color(0.22f, 0.55f, 1f), model, clips, catalog);
             FighterController playerTwo = new FighterController(2, new Vector3(1.45f, 0f, 0f),
-                new Color(1f, 0.32f, 0.22f), model, clips);
+                new Color(1f, 0.32f, 0.22f), model, clips, catalog);
 
             GameObject directorObject = new GameObject("Combat Director");
             CombatAudio combatAudio = directorObject.AddComponent<CombatAudio>();
-            combatAudio.Initialize();
+            combatAudio.Initialize(catalog.audio);
             CombatDirector director = directorObject.AddComponent<CombatDirector>();
-            director.Initialize(playerOne, playerTwo, combatAudio);
+            director.Initialize(playerOne, playerTwo, combatAudio, catalog);
 
             BuildCamera("Player 1 Camera", playerOne, playerTwo, new Rect(0f, 0f, 0.5f, 1f), true);
             BuildCamera("Player 2 Camera", playerTwo, playerOne, new Rect(0.5f, 0f, 0.5f, 1f), false);
 
             GameObject hudObject = new GameObject("Combat HUD");
             hudObject.AddComponent<CombatHud>().Initialize(director);
-            Debug.Log("双人战斗演示已初始化。P1: WASD/F/G/H，P2: 方向键/,/./\u002F");
+            Debug.Log($"双人战斗演示已从 combat_catalog.json 初始化，共 {catalog.attacks.Length} 个动作。");
         }
 
         private static void BuildArena()
@@ -108,14 +110,21 @@ namespace Swordman2.Combat
                 Object.Destroy(camera.gameObject);
         }
 
-        private static void ValidateClips(AnimationClip[] clips)
+        private static void ValidateClips(AnimationClip[] clips, CombatCatalogData catalog)
         {
-            string[] required =
+            System.Collections.Generic.HashSet<string> required = new(System.StringComparer.OrdinalIgnoreCase)
             {
-                "Idle_TwoHand_Sword", "Walk_Forward", "Walk_Backward", "Walk_Left", "Walk_Right",
-                "Attack_RtoL_Success", "Attack_RtoL_Blocked", "Attack_LtoR_Success", "Attack_LtoR_Blocked",
-                "Attack_Horizontal_Success", "Attack_Horizontal_Blocked", "Hit_Reaction_Front"
+                catalog.commonAnimations.idle, catalog.commonAnimations.walkForward,
+                catalog.commonAnimations.walkBackward, catalog.commonAnimations.walkLeft,
+                catalog.commonAnimations.walkRight, catalog.commonAnimations.hitReaction
             };
+            foreach (AttackDefinition attack in catalog.attacks)
+            {
+                required.Add(attack.animation.successRightToLeft);
+                required.Add(attack.animation.successLeftToRight);
+                required.Add(attack.animation.reboundRightToLeft);
+                required.Add(attack.animation.reboundLeftToRight);
+            }
 
             foreach (string requiredName in required)
             {
@@ -128,7 +137,7 @@ namespace Swordman2.Combat
                         break;
                     }
                 }
-                if (!found) Debug.LogError($"FBX 缺少动画：{requiredName}");
+                if (!found) Debug.LogWarning($"FBX 缺少动画：{requiredName}。对应逻辑仍会正常执行。");
             }
         }
     }

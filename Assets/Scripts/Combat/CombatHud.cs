@@ -1,3 +1,4 @@
+using System;
 using System.Text;
 using UnityEngine;
 using UnityEngine.InputSystem;
@@ -50,16 +51,17 @@ namespace Swordman2.Combat
         private void Update()
         {
             Keyboard keyboard = Keyboard.current;
-            if (keyboard != null)
+            if (keyboard != null && director?.Catalog != null)
             {
-                if (keyboard.pKey.wasPressedThisFrame) SetPaused(!isPaused);
-                if (keyboard.uKey.wasPressedThisFrame)
+                SystemControls controls = director.Catalog.controls.system;
+                if (WasPressed(keyboard, controls.pause)) SetPaused(!isPaused);
+                if (WasPressed(keyboard, controls.help))
                 {
                     helpPanel.SetActive(!helpPanel.activeSelf);
                     if (helpPanel.activeSelf) helpPanel.transform.SetAsLastSibling();
                 }
-                if (keyboard.iKey.wasPressedThisFrame) RestoreAllVitals();
-                if (keyboard.oKey.wasPressedThisFrame) adjustmentVisible = !adjustmentVisible;
+                if (WasPressed(keyboard, controls.restoreVitals)) RestoreAllVitals();
+                if (WasPressed(keyboard, controls.adjustVitals)) adjustmentVisible = !adjustmentVisible;
             }
 
             if (director == null) return;
@@ -69,12 +71,16 @@ namespace Swordman2.Combat
             if (helpPanel.activeSelf) helpText.text = BuildDynamicHelpText();
         }
 
-        private static void UpdatePlayer(PlayerWidgets ui, FighterController fighter)
+        private void UpdatePlayer(PlayerWidgets ui, FighterController fighter)
         {
             if (fighter == null) return;
             SetBarAmount(ui.Health, fighter.Health / fighter.HealthDisplayMaximum);
             SetBarAmount(ui.Stance, fighter.Stance / fighter.StanceDisplayMaximum);
-            SetBarAmount(ui.Effect, fighter.EffectTime / CombatDirector.PairEffectDuration);
+            float maximumEffect = 1f;
+            foreach (ActionPairDefinition pair in director.Catalog.actionPairs)
+                maximumEffect = Mathf.Max(maximumEffect,
+                    pair.first.nextAttackDelayFrames, pair.second.nextAttackDelayFrames);
+            SetBarAmount(ui.Effect, fighter.DelayEffectFrames / maximumEffect);
             ui.State.text = $"{ui.Label}  HP {fighter.Health:0.0}/{fighter.HealthDisplayMaximum:0}  " +
                             $"ST {fighter.Stance:0.0}/{fighter.StanceDisplayMaximum:0}\n" +
                             $"{fighter.DebugState()}  Buffer {fighter.BufferedInputCount}";
@@ -197,46 +203,67 @@ namespace Swordman2.Combat
             pauseText.rectTransform.anchorMax = new Vector2(0.8f, 0.75f);
             pauseText.rectTransform.offsetMin = Vector2.zero;
             pauseText.rectTransform.offsetMax = Vector2.zero;
-            pauseText.text = "游戏暂停\n\nP  继续游戏\nU  动态战斗信息\nI  双方生命与架势回满\nO  临时调节生命与架势";
+            SystemControls controls = director.Catalog.controls.system;
+            pauseText.text = $"游戏暂停\n\n{controls.pause}  继续游戏\n{controls.help}  动态战斗信息\n" +
+                             $"{controls.restoreVitals}  双方生命与架势回满\n{controls.adjustVitals}  临时调节生命与架势";
             pausePanel.SetActive(false);
         }
 
         private string BuildDynamicHelpText()
         {
-            AttackDefinition a = AttackDefinition.Create(AttackKind.A);
-            AttackDefinition b = AttackDefinition.Create(AttackKind.B);
-            AttackDefinition c = AttackDefinition.Create(AttackKind.C);
+            CombatCatalogData catalog = director?.Catalog;
+            if (catalog == null) return "战斗数据尚未加载。";
             StringBuilder text = new StringBuilder(1200);
             text.AppendLine(isPaused ? "动态战斗信息（当前：暂停）" : "动态战斗信息（当前：运行）");
-            text.AppendLine($"全局动作速度 {AttackDefinition.GlobalActionSpeed:0.##}x　缓冲 {FighterController.InputBufferLifetime:0.##}s　" +
-                            $"效果延时强度 {FighterController.EffectDelayStrength:0.##}x　音效提前 {CombatAudio.PairPredictionLead:0.##}s");
+            text.AppendLine($"逻辑帧率 {catalog.settings.logicFrameRate}Hz　缓冲 {catalog.settings.inputBufferFrames}帧　" +
+                            $"延迟换算 {catalog.settings.delayEffectAttackScale:0.##}x　音效提前 {catalog.audio.pairPredictionLeadSeconds:0.##}s");
             text.AppendLine();
-            AppendAttack(text, a);
-            AppendAttack(text, b);
-            AppendAttack(text, c);
+            foreach (AttackDefinition attack in catalog.attacks) AppendAttack(text, attack, catalog.settings.logicFrameRate);
             text.AppendLine();
-            text.AppendLine($"AA {PairActionSpeed.AA:0.##}x　AB A:{PairActionSpeed.AB_A:0.##}x B:{PairActionSpeed.AB_B:0.##}x　AC A:{PairActionSpeed.AC_A:0.##}x C:{PairActionSpeed.AC_C:0.##}x");
-            text.AppendLine($"BB {PairActionSpeed.BB:0.##}x　BC B:{PairActionSpeed.BC_B:0.##}x C:{PairActionSpeed.BC_C:0.##}x　CC {PairActionSpeed.CC:0.##}x");
-            text.AppendLine($"B+C：C方损失 {CombatDirector.BCPairDamage} 血并获得 {CombatDirector.PairEffectDuration:0.##}s 效果；A+C：A方获得该效果；其他动作对双方弹回。");
-            text.AppendLine("黄色效果条：剩余效果时间会延长下一次攻击。普通命中在有效期结束且确认没有重叠后结算。");
+            foreach (ActionPairDefinition pair in catalog.actionPairs) AppendPair(text, pair);
+            text.AppendLine("黄色效果条：剩余逻辑帧会按延迟换算倍率延长下一次攻击；普通命中仅在有效期结束且确认没有重叠后结算。");
             text.AppendLine();
+            AppendControls(text, "P1", catalog.controls.playerOne);
+            AppendControls(text, "P2", catalog.controls.playerTwo);
             AppendFighter(text, director?.PlayerOne, "P1");
             AppendFighter(text, director?.PlayerTwo, "P2");
-            text.AppendLine("按键：P 暂停/继续　U 关闭信息　I 回满　O 临时数值面板");
+            SystemControls system = catalog.controls.system;
+            text.AppendLine($"系统键：{system.pause} 暂停/继续　{system.help} 关闭信息　{system.restoreVitals} 回满　{system.adjustVitals} 临时数值面板");
             return text.ToString();
         }
 
-        private static void AppendAttack(StringBuilder text, AttackDefinition attack)
+        private static void AppendAttack(StringBuilder text, AttackDefinition attack, int frameRate)
         {
-            text.AppendLine($"{attack.Kind} {attack.DisplayName}：架势 {attack.StanceCost:0.##}，普通伤害 {attack.NormalDamage}，" +
-                            $"总时长 {attack.BaseDuration:0.###}s，有效期 {attack.ActiveStart:0.###}～{attack.ActiveEnd:0.###}s，范围 {attack.Radius:0.##}m");
+            text.AppendLine($"{attack.id} {attack.displayName}：架势 {attack.stanceCost:0.##}，伤害 {attack.normalDamage}，" +
+                            $"前摇/有效/后摇 {attack.windupFrames}/{attack.activeFrames}/{attack.recoveryFrames}帧，" +
+                            $"总时长 {(float)attack.TotalFrames / frameRate:0.###}s，范围 {attack.radius:0.##}m");
+        }
+
+        private static void AppendPair(StringBuilder text, ActionPairDefinition pair)
+        {
+            text.AppendLine($"{pair.displayName}：{PairSide(pair.firstAction, pair.first)}；{PairSide(pair.secondAction, pair.second)}");
+        }
+
+        private static string PairSide(string action, PairParticipantData data)
+        {
+            string value = $"{action} {(data.Result == PairParticipantResult.Continue ? "继续" : "弹回")} {data.speedScale:0.##}x";
+            if (data.damage > 0) value += $" 伤害{data.damage}";
+            if (data.nextAttackDelayFrames > 0) value += $" 延迟+{data.nextAttackDelayFrames}帧";
+            return value;
+        }
+
+        private static void AppendControls(StringBuilder text, string label, PlayerControls controls)
+        {
+            text.Append($"{label} 移动 {controls.moveUp}/{controls.moveLeft}/{controls.moveDown}/{controls.moveRight}，攻击 ");
+            foreach (AttackBinding binding in controls.attacks) text.Append($"{binding.action}:{binding.key} ");
+            text.AppendLine();
         }
 
         private static void AppendFighter(StringBuilder text, FighterController fighter, string label)
         {
             if (fighter == null) return;
             text.AppendLine($"{label}：HP {fighter.Health:0.0}/{fighter.HealthDisplayMaximum:0.0}，架势 {fighter.Stance:0.0}/{fighter.StanceDisplayMaximum:0.0}，" +
-                            $"效果 {fighter.EffectTime:0.00}s，状态 {fighter.DebugState()}，缓冲 {fighter.BufferedInputCount}");
+                            $"延迟条 {fighter.DelayEffectFrames:0}帧，状态 {fighter.DebugState()}，缓冲 {fighter.BufferedInputCount}");
         }
 
         private void SetPaused(bool paused)
@@ -280,14 +307,17 @@ namespace Swordman2.Combat
         private static void DrawFighterAdjustment(FighterController fighter, string label)
         {
             if (fighter == null) return;
-            GUILayout.Label($"{label}　生命 {fighter.Health:0.0}/{FighterController.TemporaryVitalLimit:0}（临时上限）");
-            float health = GUILayout.HorizontalSlider(fighter.Health, 0f, FighterController.TemporaryVitalLimit,
+            GUILayout.Label($"{label}　生命 {fighter.Health:0.0}/{fighter.TemporaryVitalLimit:0}（临时上限）");
+            float health = GUILayout.HorizontalSlider(fighter.Health, 0f, fighter.TemporaryVitalLimit,
                 GUILayout.Height(24f));
-            GUILayout.Label($"{label}　架势 {fighter.Stance:0.0}/{FighterController.TemporaryVitalLimit:0}（临时上限）");
-            float stance = GUILayout.HorizontalSlider(fighter.Stance, 0f, FighterController.TemporaryVitalLimit,
+            GUILayout.Label($"{label}　架势 {fighter.Stance:0.0}/{fighter.TemporaryVitalLimit:0}（临时上限）");
+            float stance = GUILayout.HorizontalSlider(fighter.Stance, 0f, fighter.TemporaryVitalLimit,
                 GUILayout.Height(24f));
             fighter.SetTemporaryVitals(health, stance);
         }
+
+        private static bool WasPressed(Keyboard keyboard, string keyName) =>
+            Enum.TryParse(keyName, true, out Key key) && keyboard[key].wasPressedThisFrame;
 
         private void OnDestroy()
         {

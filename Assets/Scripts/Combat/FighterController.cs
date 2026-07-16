@@ -5,24 +5,17 @@ namespace Swordman2.Combat
 {
     public sealed class FighterController
     {
-        public const float MaxHealth = 5f;
-        public const float MaxStance = 5f;
-        public const float TemporaryVitalLimit = 50f;
-        public const float EffectDelayStrength = 2f;
-        private const float StanceRecoveryDelay = 0.3f;
-        private const float StanceRecoveryRate = 5f / 1.5f;
-        public const float InputBufferLifetime = 0.4f;
-        private const float HitDuration = 40f / AttackDefinition.FramesPerSecond /
-                                          AttackDefinition.GlobalActionSpeed;
-
-        private readonly List<AttackKind> inputBuffer = new();
+        private readonly List<string> inputBuffer = new();
         private readonly CharacterController characterController;
         private readonly FighterAnimationPlayer animationPlayer;
+        private readonly CombatCatalogData catalog;
+        private readonly CombatSettings settings;
+        private readonly CommonAnimationData animations;
         private SlashSide nextSlashSide = SlashSide.RightToLeft;
-        private float lockedElapsed;
-        private float lockedDuration;
-        private float freeElapsed;
-        private float inputBufferElapsed;
+        private float lockedElapsedFrames;
+        private float lockedDurationFrames;
+        private float freeElapsedFrames;
+        private float inputBufferElapsedFrames;
         private Vector2 movementInput;
 
         public readonly GameObject Root;
@@ -30,15 +23,19 @@ namespace Swordman2.Combat
         public FighterController Opponent { get; set; }
         public FighterMode Mode { get; private set; } = FighterMode.Free;
         public AttackRuntime CurrentAttack { get; private set; }
-        public float Health { get; private set; } = MaxHealth;
-        public float Stance { get; private set; } = MaxStance;
-        public float EffectTime { get; private set; }
+        public float Health { get; private set; }
+        public float Stance { get; private set; }
+        public float DelayEffectFrames { get; private set; }
         public bool UsesTemporaryVitalScale { get; private set; }
-        public float HealthDisplayMaximum => UsesTemporaryVitalScale ? TemporaryVitalLimit : MaxHealth;
-        public float StanceDisplayMaximum => UsesTemporaryVitalScale ? TemporaryVitalLimit : MaxStance;
+        public float MaximumHealth => settings.maxHealth;
+        public float MaximumStance => settings.maxStance;
+        public float TemporaryVitalLimit => settings.temporaryVitalLimit;
+        public float HealthDisplayMaximum => UsesTemporaryVitalScale ? TemporaryVitalLimit : MaximumHealth;
+        public float StanceDisplayMaximum => UsesTemporaryVitalScale ? TemporaryVitalLimit : MaximumStance;
+        public float EffectTime => DelayEffectFrames / settings.logicFrameRate;
         public int BufferedInputCount => inputBuffer.Count;
         public string CurrentAnimation => animationPlayer.CurrentName;
-        public float MoveSpeed { get; set; } = 1.20f;
+        public float MoveSpeed { get; set; }
 
         public Vector3 Position => Root.transform.position;
         public Vector3 Facing
@@ -51,9 +48,17 @@ namespace Swordman2.Combat
             }
         }
 
-        public FighterController(int playerIndex, Vector3 position, Color tint, GameObject modelPrefab, AnimationClip[] clips)
+        public FighterController(int playerIndex, Vector3 position, Color tint, GameObject modelPrefab,
+            AnimationClip[] clips, CombatCatalogData combatCatalog)
         {
             PlayerIndex = playerIndex;
+            catalog = combatCatalog;
+            settings = catalog.settings;
+            animations = catalog.commonAnimations;
+            Health = settings.maxHealth;
+            Stance = settings.maxStance;
+            MoveSpeed = settings.moveSpeed;
+
             Root = new GameObject($"Player_{playerIndex}");
             Root.transform.position = position;
             characterController = Root.AddComponent<CharacterController>();
@@ -68,7 +73,6 @@ namespace Swordman2.Combat
             {
                 visual = Object.Instantiate(modelPrefab, Root.transform);
                 visual.name = "SwordsmanVisual";
-                // Blender 模型的视觉前向与 Unity 战斗根节点相反。
                 visual.transform.SetLocalPositionAndRotation(Vector3.zero, Quaternion.Euler(0f, 180f, 0f));
             }
             else
@@ -83,13 +87,10 @@ namespace Swordman2.Combat
             Animator animator = visual.GetComponentInChildren<Animator>();
             if (animator == null) animator = visual.AddComponent<Animator>();
             animationPlayer = new FighterAnimationPlayer(animator, clips);
-            animationPlayer.Play("Idle_TwoHand_Sword", true, 1f, 0f, 0.01f, true);
+            animationPlayer.Play(animations.idle, true, 1f, 0f, 0.01f, true);
         }
 
-        public void SetMovementInput(Vector2 input)
-        {
-            movementInput = Vector2.ClampMagnitude(input, 1f);
-        }
+        public void SetMovementInput(Vector2 input) => movementInput = Vector2.ClampMagnitude(input, 1f);
 
         public void Teleport(Vector3 position)
         {
@@ -100,18 +101,21 @@ namespace Swordman2.Combat
             Physics.SyncTransforms();
         }
 
-        public void SubmitAttack(AttackKind kind)
+        public void SubmitAttack(string actionId)
         {
-            if (Mode == FighterMode.Free && TryStartAttack(kind))
+            if (catalog.GetAttack(actionId) == null)
+            {
+                Debug.LogError($"P{PlayerIndex} 尝试执行不存在的动作：{actionId}");
+                return;
+            }
+            if (Mode == FighterMode.Free && TryStartAttack(actionId))
             {
                 ClearInputBuffer();
                 return;
             }
-
-            // 缓冲只保留最新攻击；新输入会替换旧输入并重新开始 0.4 秒有效期。
             inputBuffer.Clear();
-            inputBuffer.Add(kind);
-            inputBufferElapsed = 0f;
+            inputBuffer.Add(actionId);
+            inputBufferElapsedFrames = 0f;
         }
 
         public void UpdateFacing()
@@ -130,7 +134,6 @@ namespace Swordman2.Combat
                 PlayFreeAnimation(Vector2.zero);
                 return;
             }
-
             Vector3 forward = Opponent.Position - Position;
             forward.y = 0f;
             if (forward.sqrMagnitude < 0.0001f) forward = Facing;
@@ -144,32 +147,32 @@ namespace Swordman2.Combat
         public void Advance(float deltaTime)
         {
             animationPlayer.Tick(deltaTime);
-            AdvanceInputBuffer(deltaTime);
+            float deltaFrames = deltaTime * settings.logicFrameRate;
+            AdvanceInputBuffer(deltaFrames);
 
             if (Mode == FighterMode.Attack && CurrentAttack != null)
             {
                 CurrentAttack.PreviousPhase = CurrentAttack.Phase;
-                CurrentAttack.Elapsed += deltaTime * CurrentAttack.RuntimeSpeed;
-                if (CurrentAttack.Phase == AttackPhase.Finished)
-                    FinishLockedAction();
+                CurrentAttack.ElapsedFrames += deltaFrames * CurrentAttack.RuntimeSpeed;
+                animationPlayer.SetCurrentTime(CurrentAttack.SourceAnimationTime);
+                if (CurrentAttack.Phase == AttackPhase.Finished) FinishLockedAction();
                 return;
             }
 
             if (Mode == FighterMode.Rebound || Mode == FighterMode.Hit)
             {
-                lockedElapsed += deltaTime;
-                if (lockedElapsed >= lockedDuration)
-                    FinishLockedAction();
+                lockedElapsedFrames += deltaFrames;
+                if (lockedElapsedFrames >= lockedDurationFrames) FinishLockedAction();
                 return;
             }
 
-            if (EffectTime > 0f)
-                EffectTime = Mathf.Max(0f, EffectTime - deltaTime);
-
-            freeElapsed += deltaTime;
-            if (freeElapsed >= StanceRecoveryDelay && Stance < MaxStance)
-                Stance = Mathf.Min(MaxStance, Stance + StanceRecoveryRate * deltaTime);
-
+            if (DelayEffectFrames > 0f) DelayEffectFrames = Mathf.Max(0f, DelayEffectFrames - deltaFrames);
+            freeElapsedFrames += deltaFrames;
+            if (freeElapsedFrames >= settings.stanceRecoveryDelayFrames && Stance < settings.maxStance)
+            {
+                float ratePerFrame = settings.maxStance / Mathf.Max(1, settings.stanceRecoveryDurationFrames);
+                Stance = Mathf.Min(settings.maxStance, Stance + ratePerFrame * deltaFrames);
+            }
             TryStartLatestBufferedInput();
         }
 
@@ -187,24 +190,30 @@ namespace Swordman2.Combat
             if (CurrentAttack != null) CurrentAttack.Settled = true;
         }
 
-        public void EnterRebound(float pairSpeedMultiplier = 1f)
+        public void EnterRebound(float pairSpeedScale = 1f)
         {
             if (Mode != FighterMode.Attack || CurrentAttack == null) return;
-            pairSpeedMultiplier = Mathf.Max(0.01f, pairSpeedMultiplier);
+            pairSpeedScale = Mathf.Max(0.01f, pairSpeedScale);
             AttackRuntime attack = CurrentAttack;
             attack.Settled = true;
             string clip = attack.Definition.ReboundClip(attack.Side);
-            float remainingFraction = 1f - attack.Definition.ReboundNormalizedTime;
-            float speed = animationPlayer.PlaybackSpeedForDuration(clip,
-                attack.Definition.BaseDuration * attack.TimeScale) * pairSpeedMultiplier;
-            animationPlayer.Play(clip, false, speed, attack.Definition.ReboundNormalizedTime,
-                attack.Definition.BlendSeconds, true);
+            AttackAnimationData source = attack.Definition.animation;
+            float sourceStart = Mathf.Max(0f, source.reboundEntryFrame - source.sourceStartFrame) / source.sourceFrameRate;
+            float sourceEnd = Mathf.Max(sourceStart, source.sourceEndFrame - source.sourceStartFrame) / source.sourceFrameRate;
+            float sourceRemaining = Mathf.Max(0.001f, sourceEnd - sourceStart);
+            float sourceTotal = Mathf.Max(0.001f,
+                (source.sourceEndFrame - source.sourceStartFrame) / source.sourceFrameRate);
+            lockedDurationFrames = attack.TotalFrames * (sourceRemaining / sourceTotal) / pairSpeedScale;
+            float durationSeconds = lockedDurationFrames / settings.logicFrameRate;
+            float speed = animationPlayer.HasClip(clip) ? sourceRemaining / durationSeconds : 1f;
+            float clipDuration = animationPlayer.ClipDuration(clip);
+            float normalizedStart = clipDuration > 0f ? sourceStart / clipDuration : 0f;
+            animationPlayer.Play(clip, false, speed, normalizedStart,
+                attack.Definition.blendSeconds, true);
             CurrentAttack = null;
             Mode = FighterMode.Rebound;
-            lockedElapsed = 0f;
-            lockedDuration = attack.Definition.BaseDuration * remainingFraction * attack.TimeScale /
-                             pairSpeedMultiplier;
-            freeElapsed = 0f;
+            lockedElapsedFrames = 0f;
+            freeElapsedFrames = 0f;
         }
 
         public void ReceiveNormalHit(int damage)
@@ -212,113 +221,97 @@ namespace Swordman2.Combat
             Health = Mathf.Max(0f, Health - damage);
             CurrentAttack = null;
             Mode = FighterMode.Hit;
-            lockedElapsed = 0f;
-            lockedDuration = HitDuration;
-            freeElapsed = 0f;
-            float hitSpeed = animationPlayer.PlaybackSpeedForDuration("Hit_Reaction_Front", HitDuration);
-            animationPlayer.Play("Hit_Reaction_Front", false, hitSpeed, 0f, 0.06f, true);
+            lockedElapsedFrames = 0f;
+            lockedDurationFrames = settings.hitReactionFrames;
+            freeElapsedFrames = 0f;
+            float duration = lockedDurationFrames / settings.logicFrameRate;
+            float speed = animationPlayer.PlaybackSpeedForDuration(animations.hitReaction, duration);
+            animationPlayer.Play(animations.hitReaction, false, speed, 0f, animations.hitBlendSeconds, true);
         }
 
-        public void ApplyPairDamage(int damage)
-        {
-            Health = Mathf.Max(0f, Health - damage);
-        }
+        public void ApplyPairDamage(int damage) => Health = Mathf.Max(0f, Health - damage);
 
-        public void ApplyPairContinuationSpeed(float pairSpeedMultiplier)
+        public void ApplyPairContinuationSpeed(float speedScale)
         {
             if (Mode != FighterMode.Attack || CurrentAttack == null) return;
-            pairSpeedMultiplier = Mathf.Max(0.01f, pairSpeedMultiplier);
-            CurrentAttack.RuntimeSpeed *= pairSpeedMultiplier;
-            animationPlayer.MultiplyCurrentSpeed(pairSpeedMultiplier);
+            CurrentAttack.RuntimeSpeed *= Mathf.Max(0.01f, speedScale);
         }
 
-        public void ApplyEffect(float seconds)
+        public void ApplyDelayEffect(int frames)
         {
-            EffectTime = Mathf.Max(0f, seconds);
+            DelayEffectFrames = Mathf.Max(DelayEffectFrames, Mathf.Max(0, frames));
         }
 
         public void RestoreVitals()
         {
-            Health = MaxHealth;
-            Stance = MaxStance;
+            Health = settings.maxHealth;
+            Stance = settings.maxStance;
             UsesTemporaryVitalScale = false;
         }
 
         public void SetTemporaryVitals(float health, float stance)
         {
-            Health = Mathf.Clamp(health, 0f, TemporaryVitalLimit);
-            Stance = Mathf.Clamp(stance, 0f, TemporaryVitalLimit);
+            Health = Mathf.Clamp(health, 0f, settings.temporaryVitalLimit);
+            Stance = Mathf.Clamp(stance, 0f, settings.temporaryVitalLimit);
             UsesTemporaryVitalScale = true;
         }
 
-        public string DebugState()
-        {
-            if (Mode == FighterMode.Attack && CurrentAttack != null)
-                return $"{CurrentAttack.Definition.Kind}-{CurrentAttack.Phase}";
-            return Mode.ToString();
-        }
+        public string DebugState() => Mode == FighterMode.Attack && CurrentAttack != null
+            ? $"{CurrentAttack.Definition.id}-{CurrentAttack.Phase}"
+            : Mode.ToString();
 
-        public void Dispose()
-        {
-            animationPlayer.Dispose();
-        }
+        public void Dispose() => animationPlayer.Dispose();
 
-        private bool TryStartAttack(AttackKind kind)
+        private bool TryStartAttack(string actionId)
         {
             if (Mode != FighterMode.Free) return false;
-            AttackDefinition definition = AttackDefinition.Create(kind);
-            if (Stance + 0.0001f < definition.StanceCost) return false;
+            AttackDefinition definition = catalog.GetAttack(actionId);
+            if (definition == null || Stance + 0.0001f < definition.stanceCost) return false;
 
-            Stance -= definition.StanceCost;
+            Stance -= definition.stanceCost;
             SlashSide side = nextSlashSide;
-            if (kind != AttackKind.B)
-                nextSlashSide = nextSlashSide == SlashSide.RightToLeft ? SlashSide.LeftToRight : SlashSide.RightToLeft;
-
-            float effect = EffectTime;
-            EffectTime = 0f;
-            float delayedDuration = definition.BaseDuration + effect * EffectDelayStrength;
-            float timeScale = delayedDuration / definition.BaseDuration;
-            CurrentAttack = new AttackRuntime(definition, side, timeScale);
+            nextSlashSide = nextSlashSide == SlashSide.RightToLeft ? SlashSide.LeftToRight : SlashSide.RightToLeft;
+            int delayFrames = Mathf.RoundToInt(DelayEffectFrames);
+            DelayEffectFrames = 0f;
+            CurrentAttack = new AttackRuntime(definition, side, settings.logicFrameRate,
+                delayFrames, settings.delayEffectAttackScale);
             Mode = FighterMode.Attack;
-            freeElapsed = 0f;
+            freeElapsedFrames = 0f;
             string successClip = definition.SuccessClip(side);
-            float playbackSpeed = animationPlayer.PlaybackSpeedForDuration(successClip,
-                definition.BaseDuration * timeScale);
-            animationPlayer.Play(successClip, false, playbackSpeed, 0f,
-                definition.BlendSeconds, true);
+            animationPlayer.Play(successClip, false, 0f, 0f, definition.blendSeconds, true);
+            animationPlayer.SetCurrentTime(CurrentAttack.SourceAnimationTime);
             return true;
         }
 
         private void TryStartLatestBufferedInput()
         {
             if (Mode != FighterMode.Free || inputBuffer.Count == 0) return;
-            AttackKind latest = inputBuffer[^1];
+            string latest = inputBuffer[^1];
             if (!TryStartAttack(latest)) return;
             ClearInputBuffer();
         }
 
-        private void AdvanceInputBuffer(float deltaTime)
+        private void AdvanceInputBuffer(float deltaFrames)
         {
             if (inputBuffer.Count == 0) return;
-            inputBufferElapsed += deltaTime;
-            if (inputBufferElapsed >= InputBufferLifetime)
-                ClearInputBuffer();
+            inputBufferElapsedFrames += deltaFrames;
+            if (inputBufferElapsedFrames >= settings.inputBufferFrames) ClearInputBuffer();
         }
 
         private void ClearInputBuffer()
         {
             inputBuffer.Clear();
-            inputBufferElapsed = 0f;
+            inputBufferElapsedFrames = 0f;
         }
 
         private void FinishLockedAction()
         {
             Mode = FighterMode.Free;
             CurrentAttack = null;
-            lockedElapsed = 0f;
-            lockedDuration = 0f;
-            freeElapsed = 0f;
-            animationPlayer.Play("Idle_TwoHand_Sword", true, 1f, 0f, 0.08f, true);
+            lockedElapsedFrames = 0f;
+            lockedDurationFrames = 0f;
+            freeElapsedFrames = 0f;
+            animationPlayer.Play(animations.idle, true, 1f, 0f, animations.idleBlendSeconds, true);
             TryStartLatestBufferedInput();
         }
 
@@ -327,24 +320,23 @@ namespace Swordman2.Combat
             if (Mode != FighterMode.Free) return;
             if (input.sqrMagnitude < 0.001f)
             {
-                animationPlayer.Play("Idle_TwoHand_Sword", true, 1f);
+                animationPlayer.Play(animations.idle, true, 1f);
                 return;
             }
-
             string clip;
             if (Mathf.Abs(input.y) >= Mathf.Abs(input.x))
-                clip = input.y >= 0f ? "Walk_Forward" : "Walk_Backward";
+                clip = input.y >= 0f ? animations.walkForward : animations.walkBackward;
             else
-                clip = input.x < 0f ? "Walk_Left" : "Walk_Right";
-            // 0.68 m/s 是原始步幅在 30 FPS 下的匹配速度；提高位移时同步加速动画。
-            animationPlayer.Play(clip, true, MoveSpeed / 0.68f, 0f, 0.12f);
+                clip = input.x < 0f ? animations.walkLeft : animations.walkRight;
+            animationPlayer.Play(clip, true, MoveSpeed / Mathf.Max(0.01f, animations.walkReferenceSpeed),
+                0f, animations.locomotionBlendSeconds);
         }
 
         private static void TintVisual(GameObject visual, Color tint)
         {
             foreach (Renderer renderer in visual.GetComponentsInChildren<Renderer>(true))
             {
-                MaterialPropertyBlock block = new MaterialPropertyBlock();
+                MaterialPropertyBlock block = new();
                 renderer.GetPropertyBlock(block);
                 block.SetColor("_BaseColor", tint);
                 block.SetColor("_Color", tint);

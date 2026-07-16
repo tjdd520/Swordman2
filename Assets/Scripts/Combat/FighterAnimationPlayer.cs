@@ -57,6 +57,19 @@ namespace Swordman2.Combat
             slots[currentSlot].SetSpeed(slots[currentSlot].GetSpeed() * Mathf.Max(0.01f, multiplier));
         }
 
+        public void SetCurrentTime(float seconds)
+        {
+            if (!valid[currentSlot]) return;
+            AnimationClip clip = slots[currentSlot].GetAnimationClip();
+            slots[currentSlot].SetTime(Mathf.Clamp(seconds, 0f, Mathf.Max(0f, clip.length - 0.0001f)));
+            slots[currentSlot].SetSpeed(0f);
+        }
+
+        public float ClipDuration(string clipName)
+        {
+            return clips.TryGetValue(clipName, out AnimationClip clip) ? clip.length : 0f;
+        }
+
         public void Play(string clipName, bool loop, float speed = 1f, float normalizedStart = 0f, float blend = 0.08f, bool force = false)
         {
             if (!clips.TryGetValue(clipName, out AnimationClip clip))

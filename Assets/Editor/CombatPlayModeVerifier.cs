@@ -20,8 +20,10 @@ public static class CombatPlayModeVerifier
         EditorApplication.playModeStateChanged += OnPlayModeChanged;
     }
 
+    [MenuItem("Swordman2/Run Combat Verification")]
     public static void Run()
     {
+        director = null;
         SessionState.SetBool(VerificationFlag, true);
         EditorSceneManager.OpenScene("Assets/Scenes/SampleScene.unity", OpenSceneMode.Single);
         EditorApplication.EnterPlaymode();
@@ -41,7 +43,7 @@ public static class CombatPlayModeVerifier
         {
             SessionState.EraseBool(VerificationFlag);
             Debug.Log("VERIFY_PASS: Play Mode 战斗集成验证全部通过");
-            EditorApplication.Exit(0);
+            if (Application.isBatchMode) EditorApplication.Exit(0);
         }
     }
 
@@ -71,8 +73,8 @@ public static class CombatPlayModeVerifier
                     LogRendererDiagnostics(director.PlayerTwo);
                     CapturePreview();
                     SetCloseRange();
-                    director.PlayerOne.SubmitAttack(AttackKind.A);
-                    director.PlayerTwo.SubmitAttack(AttackKind.A);
+                    director.PlayerOne.SubmitAttack("A");
+                    director.PlayerTwo.SubmitAttack("A");
                     NextStage();
                     break;
 
@@ -87,8 +89,8 @@ public static class CombatPlayModeVerifier
                 case 2 when (director.PlayerOne.Mode == FighterMode.Free && director.PlayerTwo.Mode == FighterMode.Free) || Elapsed >= 8f:
                     Require(director.PlayerOne.Mode == FighterMode.Free && director.PlayerTwo.Mode == FighterMode.Free,
                         "A对A弹回动画未正常结束");
-                    director.PlayerOne.SubmitAttack(AttackKind.B);
-                    director.PlayerTwo.SubmitAttack(AttackKind.C);
+                    director.PlayerOne.SubmitAttack("B");
+                    director.PlayerTwo.SubmitAttack("C");
                     NextStage();
                     break;
 
@@ -96,8 +98,8 @@ public static class CombatPlayModeVerifier
                     Require(director.PlayerOne.Mode == FighterMode.Attack, "B对C时 B方未继续成功动画");
                     Require(director.PlayerTwo.Mode == FighterMode.Rebound, "B对C时 C方未弹回");
                     Require(Mathf.Approximately(director.PlayerTwo.Health,
-                            FighterController.MaxHealth - CombatDirector.BCPairDamage),
-                        $"B对C时 C方伤害不是{CombatDirector.BCPairDamage}");
+                            director.PlayerTwo.MaximumHealth - 3f),
+                        "B对C时 C方伤害不是3");
                     Require(director.PlayerTwo.EffectTime > 0.29f, "B对C时 C方未获得冻结的0.3秒效果");
                     NextStage();
                     break;
@@ -107,18 +109,18 @@ public static class CombatPlayModeVerifier
                              director.PlayerOne.CurrentAttack.Elapsed <= 0.3f) || Elapsed >= 8f:
                     Require(director.PlayerOne.CurrentAttack != null, "等待缓冲测试时 P1 攻击已意外结束");
                     SetFarRange();
-                    director.PlayerOne.SubmitAttack(AttackKind.A);
-                    director.PlayerOne.SubmitAttack(AttackKind.B);
-                    director.PlayerTwo.SubmitAttack(AttackKind.A);
+                    director.PlayerOne.SubmitAttack("A");
+                    director.PlayerOne.SubmitAttack("B");
+                    director.PlayerTwo.SubmitAttack("A");
                     NextStage();
                     break;
 
                 case 5 when (director.PlayerOne.CurrentAttack != null && director.PlayerTwo.CurrentAttack != null &&
-                             director.PlayerOne.CurrentAttack.Definition.Kind == AttackKind.B &&
-                             director.PlayerTwo.CurrentAttack.Definition.Kind == AttackKind.A &&
+                             director.PlayerOne.CurrentAttack.Definition.id == "B" &&
+                             director.PlayerTwo.CurrentAttack.Definition.id == "A" &&
                              director.PlayerOne.BufferedInputCount == 0 && director.PlayerTwo.BufferedInputCount == 0) || Elapsed >= 8f:
                     Require(director.PlayerOne.CurrentAttack != null &&
-                            director.PlayerOne.CurrentAttack.Definition.Kind == AttackKind.B,
+                            director.PlayerOne.CurrentAttack.Definition.id == "B",
                         "最新输入B没有优先于旧输入A执行");
                     Require(Mathf.Approximately(director.PlayerOne.Stance, 0f),
                         "最新输入执行后架势消耗不正确");
@@ -135,7 +137,7 @@ public static class CombatPlayModeVerifier
                         "缓冲攻击未正常结束");
                     SetCloseRange();
                     expectedHealth = director.PlayerTwo.Health;
-                    director.PlayerOne.SubmitAttack(AttackKind.A);
+                    director.PlayerOne.SubmitAttack("A");
                     NextStage();
                     break;
 
@@ -246,6 +248,6 @@ public static class CombatPlayModeVerifier
         SessionState.EraseBool(VerificationFlag);
         Debug.LogError("VERIFY_FAIL: " + message);
         if (EditorApplication.isPlaying) EditorApplication.ExitPlaymode();
-        EditorApplication.Exit(2);
+        if (Application.isBatchMode) EditorApplication.Exit(2);
     }
 }

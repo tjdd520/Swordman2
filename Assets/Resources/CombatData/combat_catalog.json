@@ -1,0 +1,94 @@
+{
+  "settings": {
+    "logicFrameRate": 120,
+    "maxHealth": 5.0,
+    "maxStance": 5.0,
+    "temporaryVitalLimit": 50.0,
+    "moveSpeed": 1.2,
+    "inputBufferFrames": 48,
+    "stanceRecoveryDelayFrames": 36,
+    "stanceRecoveryDurationFrames": 180,
+    "hitReactionFrames": 46,
+    "delayEffectAttackScale": 2.0
+  },
+  "commonAnimations": {
+    "idle": "Idle_TwoHand_Sword",
+    "walkForward": "Walk_Forward",
+    "walkBackward": "Walk_Backward",
+    "walkLeft": "Walk_Left",
+    "walkRight": "Walk_Right",
+    "hitReaction": "Hit_Reaction_Front",
+    "walkReferenceSpeed": 0.68,
+    "locomotionBlendSeconds": 0.12,
+    "idleBlendSeconds": 0.08,
+    "hitBlendSeconds": 0.06
+  },
+  "controls": {
+    "playerOne": {
+      "moveLeft": "A", "moveRight": "D", "moveDown": "S", "moveUp": "W",
+      "attacks": [
+        { "action": "A", "key": "F" },
+        { "action": "B", "key": "G" },
+        { "action": "C", "key": "H" }
+      ]
+    },
+    "playerTwo": {
+      "moveLeft": "LeftArrow", "moveRight": "RightArrow", "moveDown": "DownArrow", "moveUp": "UpArrow",
+      "attacks": [
+        { "action": "A", "key": "Comma" },
+        { "action": "B", "key": "Period" },
+        { "action": "C", "key": "Slash" }
+      ]
+    },
+    "system": { "pause": "P", "help": "U", "restoreVitals": "I", "adjustVitals": "O" }
+  },
+  "audio": {
+    "normalHit": "Audio/NormalHit",
+    "pairSequence": ["Audio/PerfectParry4", "Audio/PerfectParry5", "Audio/PerfectParry6"],
+    "pairChainWindowSeconds": 1.5,
+    "pairPredictionLeadSeconds": 0.4,
+    "firstPairStartOffsetSeconds": 0.3,
+    "sourcePoolSize": 8,
+    "volume": 0.85
+  },
+  "attacks": [
+    {
+      "id": "A", "displayName": "轻击", "stanceCost": 1.0, "normalDamage": 1,
+      "windupFrames": 14, "activeFrames": 23, "recoveryFrames": 23, "radius": 2.1, "blendSeconds": 0.08,
+      "animation": {
+        "successRightToLeft": "Attack_RtoL_Success", "successLeftToRight": "Attack_LtoR_Success",
+        "reboundRightToLeft": "Attack_RtoL_Blocked", "reboundLeftToRight": "Attack_LtoR_Blocked",
+        "sourceFrameRate": 30.0, "sourceStartFrame": 1, "sourceActiveStartFrame": 18,
+        "sourceActiveEndFrame": 38, "sourceEndFrame": 52, "reboundEntryFrame": 21
+      }
+    },
+    {
+      "id": "B", "displayName": "重击", "stanceCost": 2.0, "normalDamage": 3,
+      "windupFrames": 14, "activeFrames": 23, "recoveryFrames": 23, "radius": 2.1, "blendSeconds": 0.08,
+      "animation": {
+        "successRightToLeft": "Attack_Horizontal_Success", "successLeftToRight": "Attack_Horizontal_Success",
+        "reboundRightToLeft": "Attack_Horizontal_Blocked", "reboundLeftToRight": "Attack_Horizontal_Blocked",
+        "sourceFrameRate": 30.0, "sourceStartFrame": 1, "sourceActiveStartFrame": 18,
+        "sourceActiveEndFrame": 38, "sourceEndFrame": 52, "reboundEntryFrame": 21
+      }
+    },
+    {
+      "id": "C", "displayName": "挑飞", "stanceCost": 1.0, "normalDamage": 1,
+      "windupFrames": 14, "activeFrames": 23, "recoveryFrames": 23, "radius": 2.1, "blendSeconds": 0.08,
+      "animation": {
+        "successRightToLeft": "Attack_RtoL_Success", "successLeftToRight": "Attack_LtoR_Success",
+        "reboundRightToLeft": "Attack_RtoL_Blocked", "reboundLeftToRight": "Attack_LtoR_Blocked",
+        "sourceFrameRate": 30.0, "sourceStartFrame": 1, "sourceActiveStartFrame": 18,
+        "sourceActiveEndFrame": 38, "sourceEndFrame": 52, "reboundEntryFrame": 21
+      }
+    }
+  ],
+  "actionPairs": [
+    { "firstAction": "A", "secondAction": "A", "displayName": "A对A", "first": { "result": "Rebound", "speedScale": 0.48, "damage": 0, "nextAttackDelayFrames": 0 }, "second": { "result": "Rebound", "speedScale": 0.48, "damage": 0, "nextAttackDelayFrames": 0 } },
+    { "firstAction": "A", "secondAction": "B", "displayName": "A对B", "first": { "result": "Rebound", "speedScale": 0.40, "damage": 0, "nextAttackDelayFrames": 0 }, "second": { "result": "Rebound", "speedScale": 0.30, "damage": 0, "nextAttackDelayFrames": 0 } },
+    { "firstAction": "A", "secondAction": "C", "displayName": "A对C", "first": { "result": "Rebound", "speedScale": 0.45, "damage": 0, "nextAttackDelayFrames": 36 }, "second": { "result": "Rebound", "speedScale": 0.50, "damage": 0, "nextAttackDelayFrames": 0 } },
+    { "firstAction": "B", "secondAction": "B", "displayName": "B对B", "first": { "result": "Rebound", "speedScale": 0.30, "damage": 0, "nextAttackDelayFrames": 0 }, "second": { "result": "Rebound", "speedScale": 0.30, "damage": 0, "nextAttackDelayFrames": 0 } },
+    { "firstAction": "B", "secondAction": "C", "displayName": "B对C", "first": { "result": "Continue", "speedScale": 0.35, "damage": 0, "nextAttackDelayFrames": 0 }, "second": { "result": "Rebound", "speedScale": 0.40, "damage": 3, "nextAttackDelayFrames": 36 } },
+    { "firstAction": "C", "secondAction": "C", "displayName": "C对C", "first": { "result": "Rebound", "speedScale": 0.60, "damage": 0, "nextAttackDelayFrames": 0 }, "second": { "result": "Rebound", "speedScale": 0.60, "damage": 0, "nextAttackDelayFrames": 0 } }
+  ]
+}
