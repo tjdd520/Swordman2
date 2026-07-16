@@ -21,7 +21,6 @@
 | `Swordman2/Assets/Resources/CombatData/combat_catalog.json` | 全局战斗设置、键位、音频、动作和动作对数据 |
 | `Swordman2/Assets/Resources/Models/Swordsman.fbx` | 角色模型和动画片段 |
 | `Swordman2/Assets/Resources/Audio/` | 普通命中和动作对音效 |
-| `New Folder/2.blend` | 角色与动画源工程 |
 
 ### 2.2 运行时脚本
 
@@ -29,9 +28,11 @@
 |---|---|
 | `CombatCatalog.cs` | JSON 数据类型、加载、校验、动作和动作对查询 |
 | `CombatDefinitions.cs` | 运行时枚举和 `AttackRuntime` 动作实例 |
+| `CombatProtocol.cs` | 可序列化的输入命令、战斗事件和完整快照协议 |
+| `CombatSimulation.cs` | 不依赖 Unity 场景对象的固定步战斗规则、移动、命中和动作对结算 |
 | `CombatBootstrap.cs` | 启动入口，创建场地、角色、摄像机、音频和 HUD |
-| `CombatDirector.cs` | 输入采集、固定步模拟、普通命中和动作对结算 |
-| `FighterController.cs` | 单角色状态、移动、攻击、缓冲、架势、生命和延迟条 |
+| `CombatDirector.cs` | 本地键盘输入适配、固定步调度、快照分发和事件表现转发 |
+| `FighterController.cs` | 快照驱动的角色模型、Transform 和动画表现适配器 |
 | `FighterAnimationPlayer.cs` | Playables 动画图、混合、播放和攻击动画时间定位 |
 | `CombatAudio.cs` | 音效加载、动作对预测序列和重叠播放 |
 | `CombatHud.cs` | 运行时状态 UI 和动态数据展示 |
@@ -55,11 +56,12 @@ CombatCatalogLoader
         ▼
 CombatBootstrap
         │
-        ├── FighterController × 2
-        │       └── FighterAnimationPlayer
-        │
         ├── CombatDirector
+        │       ├── CombatInputCommand × 2
+        │       ├── CombatSimulation
+        │       │       └── CombatSnapshot / CombatEvent
         │       ├── FighterController × 2
+        │       │       └── FighterAnimationPlayer
         │       └── CombatAudio
         │
         ├── CombatHud
@@ -70,9 +72,10 @@ CombatBootstrap
 
 依赖方向应保持单向：
 
-- 数据类型不依赖角色、UI 或场景对象；
-- 角色控制器不负责双方战斗规则；
-- 双方交互只由 `CombatDirector` 结算；
+- `CombatProtocol` 和 `CombatSimulation` 不依赖角色、UI、动画或场景对象；
+- `CombatSimulation` 是生命、架势、位置、动作、缓冲和动作对结果的唯一权威；
+- `CombatDirector` 只负责把本地输入变成命令，并把快照和事件交给表现层；
+- `FighterController` 不结算战斗规则，只应用快照；
 - HUD 只读取公开状态，不写入战斗内部字段；
 - 动画缺失不能中断战斗逻辑。
 
@@ -102,14 +105,16 @@ simulationStep = 1 / settings.logicFrameRate
 
 重复执行 `Simulate()`。默认逻辑帧率为 120Hz。
 
-每个逻辑步的顺序：
+每个逻辑步由 `CombatDirector` 为 P1、P2 各构造一个相同 Tick 的 `CombatInputCommand`，再调用 `CombatSimulation.Step()`。纯模拟层按以下顺序执行：
 
-1. 设置双方移动输入；
-2. 更新双方朝向；
-3. 推进移动；
-4. 推进角色状态和动作逻辑帧；
+1. 校验命令 Tick 和玩家编号；
+2. 应用移动与攻击输入；
+3. 更新朝向并推进移动；
+4. 推进角色状态、动作逻辑帧、缓冲、架势和延迟条；
 5. 检查有效期、范围和时间重叠；
-6. 结算动作对或已结束有效期的普通命中。
+6. 结算动作对或已结束有效期的普通命中；
+7. 生成 `CombatSnapshot` 和本 Tick 的 `CombatEvent`；
+8. `CombatDirector` 把快照应用到角色、HUD，并把事件转给音效等表现系统。
 
 ## 5. 时间模型
 
@@ -181,11 +186,11 @@ simulationStep = 1 / settings.logicFrameRate
   "id": "A",
   "displayName": "轻击",
   "stanceCost": 1.0,
-  "normalDamage": 1,
+  "normalDamage": 4,
   "startupPoise": 1,
-  "windupFrames": 14,
-  "activeFrames": 23,
-  "recoveryFrames": 23,
+  "windupFrames": 28,
+  "activeFrames": 33,
+  "recoveryFrames": 16,
   "radius": 2.1,
   "blendSeconds": 0.08,
   "animation": {}
@@ -228,8 +233,7 @@ simulationStep = 1 / settings.logicFrameRate
   "sourceStartFrame": 1,
   "sourceActiveStartFrame": 18,
   "sourceActiveEndFrame": 38,
-  "sourceEndFrame": 52,
-  "reboundEntryFrame": 21
+  "sourceEndFrame": 52
 }
 ```
 
@@ -241,7 +245,7 @@ simulationStep = 1 / settings.logicFrameRate
 逻辑后摇   → sourceActiveEndFrame 至 sourceEndFrame
 ```
 
-`AttackRuntime.SourceAnimationTime` 按当前逻辑阶段分别插值源动画时间，`FighterController.Advance()` 每个逻辑步调用 `FighterAnimationPlayer.SetCurrentTime()`。因此单独改变某一逻辑阶段只会拉伸或压缩对应动画区段。
+`AttackRuntime.SourceAnimationTime` 按当前逻辑阶段分别插值源动画时间，`FighterController.ApplySnapshot()` 每个逻辑步调用 `FighterAnimationPlayer.SetCurrentTime()`。因此单独改变某一逻辑阶段只会拉伸或压缩对应动画区段。
 
 源分段必须满足：
 
@@ -252,7 +256,9 @@ sourceStartFrame
   < sourceEndFrame
 ```
 
-`reboundEntryFrame` 必须位于源动画起止范围内。
+动作对成立时不再使用固定的弹回进入帧。`CombatSimulation` 记录双方当时各自的实际动画源帧到 `FighterSnapshot.lockedAnimationStartFrame`，`FighterController` 从该帧切入对应的 `Blocked` 动画，并根据剩余源动画长度重算弹回时长。这样逻辑仍在有效期重叠时确定动作对，但表现会继续完成当前向下挥击并自然进入武器接触和弹开，不会从举剑高点直接跳过挥击段。
+
+成功动画和对应的 `Blocked` 动画必须使用相同的源时间轴和姿势对齐方式；至少从 `sourceActiveStartFrame` 到实际碰撞段应保持姿势连续。否则代码可以保证时间连续，但无法修复动画资源自身的姿势不连续。
 
 ## 10. 动作运行时接口
 
@@ -276,6 +282,8 @@ sourceStartFrame
 | `ActualActiveStart/End` | 考虑延迟后的有效期秒数边界 |
 | `SourceAnimationTime` | 当前逻辑帧对应的动画源时间 |
 
+`FighterSnapshot` 在非自由状态下还保存 `lockedActionId`、`lockedActionSide`、`lockedElapsedFrames`、`lockedDurationFrames` 和 `lockedAnimationStartFrame`。这些字段必须随权威快照一起传输，否则客户端无法在相同挥击帧进入弹刀动画。
+
 ## 11. 动作对数据接口
 
 动作对采用无序组合，每种组合只保存一条：
@@ -287,20 +295,20 @@ sourceStartFrame
   "displayName": "B对C",
   "first": {
     "result": "Continue",
-    "speedScale": 0.35,
+    "speedScale": 1.0,
     "damage": 0,
     "nextAttackDelayFrames": 0
   },
   "second": {
     "result": "Rebound",
-    "speedScale": 0.40,
+    "speedScale": 1.0,
     "damage": 3,
     "nextAttackDelayFrames": 120
   }
 }
 ```
 
-`first` 永远对应 `firstAction`，`second` 永远对应 `secondAction`，不表示 P1/P2。运行时 `CombatCatalogData.GetPair()` 返回 `swapped`，由 `CombatDirector` 将双方数据映射到实际玩家。
+`first` 永远对应 `firstAction`，`second` 永远对应 `secondAction`，不表示 P1/P2。运行时 `CombatCatalogData.GetPair()` 返回 `swapped`，由 `CombatSimulation` 将双方数据映射到实际玩家。
 
 动作 ID 必须按不区分大小写的升序保存，例如 B+C，不能保存 C+B。
 
@@ -313,11 +321,11 @@ sourceStartFrame
 | `damage` | 该参与方立即受到的伤害 |
 | `nextAttackDelayFrames` | 该参与方获得的延迟条帧数 |
 
-`Continue` 由 `ApplyPairContinuationSpeed()` 处理；`Rebound` 由 `EnterRebound()` 处理。JSON 只选择固定结果并提供数值。
+`Continue` 和 `Rebound` 均由 `CombatSimulation` 解释；JSON 只选择固定结果并提供数值。
 
 ## 12. 延迟条机制
 
-动作对中的 `nextAttackDelayFrames` 通过 `FighterController.ApplyDelayEffect()` 写入角色延迟条。
+动作对中的 `nextAttackDelayFrames` 由 `CombatSimulation` 写入权威角色快照的延迟条。
 
 延迟条在 Free、Attack、Rebound 和 Hit 状态下均按逻辑帧持续递减；游戏暂停时不推进。它不会为了下一动作而暂停或强制保留。角色下一次成功启动攻击时只读取并清空当时的剩余延迟条：
 
@@ -370,7 +378,7 @@ TimeScale = (基础总帧 + 追加动作帧) / 基础总帧
 
 每个玩家必须绑定全部动作。键名通过 `Enum.TryParse<Key>()` 转换，无效键名会使目录校验失败。
 
-攻击缓冲由 `FighterController.SubmitAttack()` 管理：只保留最新动作，新的输入会替换旧输入并重置缓冲帧数。
+攻击按键先由 `CombatDirector` 变成 `CombatInputCommand.attackAction`，攻击缓冲由 `CombatSimulation` 管理：只保留最新动作，新的输入会替换旧输入并重置缓冲帧数。
 
 ## 15. 音频接口
 
@@ -384,7 +392,7 @@ TimeScale = (基础总帧 + 追加动作帧) / 基础总帧
 | `pairPredictionLeadSeconds` | 动作对预测音效最大提前量 |
 | `volume` | AudioSource 音量 |
 
-`CombatDirector.TryPlayPredictedPairAudio()` 根据双方未来有效期交集和当前范围预测动作对，`CombatAudio.PlayActionPair()` 负责序列索引与播放。`CombatAudio` 使用一个预加载的二维 `AudioSource`，通过 `PlayOneShot()` 允许音效重叠，不再维护 AudioSource 池或运行时跳过音频开头。
+`CombatSimulation` 根据双方未来有效期交集和当前范围预测动作对并发出 `ActionPairPredicted` 事件，`CombatDirector` 消费事件后调用 `CombatAudio.PlayActionPair()`。`CombatAudio` 使用一个预加载的二维 `AudioSource`，通过 `PlayOneShot()` 允许音效重叠，不再维护 AudioSource 池或运行时跳过音频开头。
 
 `Assets/Resources/Audio/` 中的战斗音效使用已经裁除前导静音的 WAV/PCM 文件，并启用 `preloadAudioData`。新增或替换短音效时应先清除明显的前导静音，避免把素材空白误判为代码触发延迟。
 
@@ -405,18 +413,46 @@ TimeScale = (基础总帧 + 追加动作帧) / 基础总帧
 | `GetPair(string firstAction, string secondAction, out bool swapped)` | 查询无序动作对并返回参数是否交换 |
 | `RebuildLookups()` | 数据重新构造后重建运行时查询表 |
 
-### 16.3 CombatDirector
+### 16.3 CombatProtocol
+
+| 类型 | 用途 |
+|---|---|
+| `CombatInputCommand` | 单个玩家在指定 Tick 的移动和攻击输入；未来网络层只需传输或重放该命令 |
+| `CombatEvent` | 模拟层产生的一次性事件；用于音效、特效、日志等非权威表现 |
+| `FighterSnapshot` | 单个玩家的完整权威状态，包括位置、朝向、动作、生命、架势、缓冲和锁定动画数据 |
+| `CombatSnapshot` | 指定 Tick 的双方完整状态，可序列化、恢复和用于服务器校正 |
+
+快照是状态事实，事件是该 Tick 发生过什么。断线重连或服务器校正必须使用快照，不能只重放表现事件。
+
+### 16.4 CombatSimulation
+
+| 接口 | 用途 |
+|---|---|
+| `Step(CombatInputCommand, CombatInputCommand)` | 推进一个确定性逻辑 Tick，并返回新快照 |
+| `CaptureSnapshot()` | 克隆当前完整权威状态 |
+| `ApplySnapshot(CombatSnapshot)` | 恢复权威状态并清空旧事件，供网络校正或回放使用 |
+| `Events` | 当前 Tick 产生的只读事件列表 |
+| `Teleport(...)` / `RecalculateFacing()` | 调试或场景管理接口 |
+| `RestoreVitals(...)` / `SetTemporaryVitals(...)` | HUD 调试面板使用的权威数值修改接口 |
+
+所有新增战斗规则都应优先放在 `CombatSimulation`。该文件不得引用 `UnityEngine`、GameObject、Animator、HUD 或音频对象。
+
+### 16.5 CombatDirector
 
 | 成员 | 用途 |
 |---|---|
 | `Initialize(FighterController, FighterController, CombatAudio, CombatCatalogData)` | 注入双方角色、音频和目录 |
 | `Catalog` | 当前只读战斗目录 |
+| `Simulation` | 当前纯战斗模拟实例 |
+| `CurrentSnapshot` | 当前完整快照的克隆，外部修改不会直接污染模拟状态 |
 | `PlayerOne` / `PlayerTwo` | 双方控制器 |
 | `LastEvent` | 最近一次战斗事件文本 |
+| `QueueAttack(int, string)` | 本地输入或测试代码提交一次攻击命令 |
+| `ApplyAuthoritativeSnapshot(CombatSnapshot)` | 清空待处理本地攻击并应用服务器或回放快照 |
 
-双方交互规则应添加在 `CombatDirector`，不要放入单个 `FighterController`。
+`CombatDirector` 是当前本地键盘适配器和表现协调器，不应保存独立的战斗规则副本。
 
-### 16.4 FighterController
+### 16.6 FighterController
 
 状态读取接口：
 
@@ -430,29 +466,20 @@ TimeScale = (基础总帧 + 追加动作帧) / 基础总帧
 | `CurrentAnimation` | 当前动画片段名称 |
 | `BufferedInputCount` | 当前缓冲输入数量 |
 
-控制和结算接口：
+表现和转发接口：
 
 | 接口 | 调用方/用途 |
 |---|---|
-| `SetMovementInput(Vector2)` | `CombatDirector` 写入本逻辑步移动输入 |
 | `SubmitAttack(string)` | 输入层或其他系统提交动作 ID |
-| `UpdateFacing()` | 朝向锁定目标 |
-| `UpdateMovement(float)` | 推进自由移动 |
-| `Advance(float)` | 推进状态、动画、架势和缓冲 |
-| `IsInRangeOf(FighterController, float)` | `CombatDirector` 范围判定 |
-| `MarkAttackSettled()` | 标记当前攻击已结算 |
-| `EnterRebound(float)` | 应用动作对弹回结果 |
-| `ReceiveInterruptingHit(int)` | 扣血、取消攻击、清空缓冲并进入受击锁定 |
-| `ReceiveArmoredHit(int)` | 只扣血，保留当前攻击、动画和输入缓冲 |
-| `ApplyPairDamage(int)` | 应用动作对直接伤害 |
-| `ApplyPairContinuationSpeed(float)` | 应用 Continue 结果的推进倍率 |
-| `ApplyDelayEffect(int)` | 写入延迟条帧数 |
+| `ApplySnapshot(FighterSnapshot, float)` | `CombatDirector` 应用权威状态并驱动 Transform 与动画；内部接口 |
+| `UpdateFacing()` | 转发到模拟层重新计算双方朝向 |
+| `IsInRangeOf(FighterController, float)` | 只读兼容查询；权威范围判定仍在模拟层 |
 | `RestoreVitals()` | 恢复默认生命和架势 |
 | `SetTemporaryVitals(float, float)` | 设置临时生命和架势 |
-| `Teleport(Vector3)` | 调试或场景系统安全移动 CharacterController |
+| `Teleport(Vector3)` | 把调试移动请求转发到模拟层，再应用新快照 |
 | `Dispose()` | 销毁角色动画 PlayableGraph |
 
-### 16.5 FighterAnimationPlayer
+### 16.7 FighterAnimationPlayer
 
 | 接口 | 用途 |
 |---|---|
@@ -464,7 +491,7 @@ TimeScale = (基础总帧 + 追加动作帧) / 基础总帧
 | `Tick(float)` | 推进循环和混合状态 |
 | `Dispose()` | 销毁 PlayableGraph |
 
-### 16.6 CombatAudio
+### 16.8 CombatAudio
 
 | 接口 | 用途 |
 |---|---|
@@ -472,7 +499,7 @@ TimeScale = (基础总帧 + 追加动作帧) / 基础总帧
 | `PlayActionPair(float predictedPairTime)` | 按预测动作对时间推进并播放循环序列 |
 | `PlayNormalHit()` | 播放普通命中音效 |
 
-### 16.7 CombatHud
+### 16.9 CombatHud
 
 `Initialize(CombatDirector)` 注入唯一数据源。HUD 通过 `CombatDirector` 和双方 `FighterController` 读取状态，不应持有独立战斗数值副本。
 
@@ -519,8 +546,8 @@ N × (N + 1) / 2
 
 1. 在 `PairParticipantData` 增加纯数据字段；
 2. 在 `CombatCatalogLoader.ValidateParticipant()` 增加约束；
-3. 在 `CombatDirector.ApplyPairValues()` 或 `ApplyPairResult()` 解释该字段；
-4. 如效果只影响单角色内部状态，再由 `CombatDirector` 调用新的 `FighterController` 接口；
+3. 在 `CombatSimulation.ApplyPairValues()` 或 `ApplyPairResult()` 解释该字段；
+4. 把结果写入 `FighterSnapshot`；如需声音、特效或镜头表现，再增加对应的 `CombatEvent`；
 5. JSON 仍不得保存脚本名、类名或任意可执行内容。
 
 保持“目录选择与提供数值，C# 定义规则语义”的设计边界。
@@ -539,3 +566,26 @@ N × (N + 1) / 2
 - 固定逻辑步的推进顺序。
 
 JSON 决定动作、资源、键位、选择和数值；C# 保证规则稳定、可检查且可扩展。
+
+## 21. 网络联机接入边界
+
+当前工程尚未绑定具体网络库，但战斗核心已经拆成以下边界：
+
+```text
+本地/远端输入
+    ↓
+CombatInputCommand
+    ↓
+CombatSimulation
+    ├── CombatSnapshot（权威状态、校正、重连、回放）
+    └── CombatEvent（音效、特效、提示等一次性表现）
+```
+
+接入服务器权威同步时建议传输：
+
+- 客户端到服务器：Tick、玩家编号、移动轴和攻击动作 ID；
+- 服务器到客户端：确认 Tick、完整或增量 `CombatSnapshot`，以及需要即时表现的事件；
+- 定期完整快照：用于校验生命、架势、位置、动作阶段、输入缓冲、延迟条和弹刀动画接入帧；
+- 不传输 Animator、GameObject、HUD 或 AudioSource 状态，这些均由客户端根据快照和事件重建。
+
+预测、回滚和插值应建立在命令与快照之上，不要让网络层直接修改 `FighterController` 字段。

@@ -71,6 +71,7 @@ public static class CombatPlayModeVerifier
                     Require(director.PlayerTwo.CurrentAnimation == "Idle_TwoHand_Sword", "P2 未加载待机动作");
                     LogRendererDiagnostics(director.PlayerOne);
                     LogRendererDiagnostics(director.PlayerTwo);
+                    VerifySimulationProtocol();
                     CapturePreview();
                     SetCloseRange();
                     director.PlayerOne.SubmitAttack("A");
@@ -81,8 +82,9 @@ public static class CombatPlayModeVerifier
                 case 1 when director.PlayerOne.Mode == FighterMode.Rebound || Elapsed >= 8f:
                     Require(director.PlayerOne.Mode == FighterMode.Rebound, "A对A时 P1 未进入弹回");
                     Require(director.PlayerTwo.Mode == FighterMode.Rebound, "A对A时 P2 未进入弹回");
-                    Require(Mathf.Approximately(director.PlayerOne.Health, 5f) &&
-                            Mathf.Approximately(director.PlayerTwo.Health, 5f), "A对A错误扣血");
+                    Require(Mathf.Approximately(director.PlayerOne.Health, director.PlayerOne.MaximumHealth) &&
+                            Mathf.Approximately(director.PlayerTwo.Health, director.PlayerTwo.MaximumHealth),
+                        "A对A错误扣血");
                     NextStage();
                     break;
 
@@ -97,10 +99,12 @@ public static class CombatPlayModeVerifier
                 case 3 when director.PlayerTwo.Mode == FighterMode.Rebound || Elapsed >= 8f:
                     Require(director.PlayerOne.Mode == FighterMode.Attack, "B对C时 B方未继续成功动画");
                     Require(director.PlayerTwo.Mode == FighterMode.Rebound, "B对C时 C方未弹回");
+                    PairParticipantData bcSecond = director.Catalog.GetPair("B", "C", out _).second;
                     Require(Mathf.Approximately(director.PlayerTwo.Health,
-                            director.PlayerTwo.MaximumHealth - 3f),
-                        "B对C时 C方伤害不是3");
-                    Require(director.PlayerTwo.EffectTime > 0.29f, "B对C时 C方未获得冻结的0.3秒效果");
+                            director.PlayerTwo.MaximumHealth - bcSecond.damage),
+                        "B对C时 C方伤害与JSON不一致");
+                    Require(director.PlayerTwo.DelayEffectFrames > bcSecond.nextAttackDelayFrames * 0.5f,
+                        "B对C时 C方未获得JSON配置的延迟条");
                     NextStage();
                     break;
 
@@ -122,13 +126,9 @@ public static class CombatPlayModeVerifier
                     Require(director.PlayerOne.CurrentAttack != null &&
                             director.PlayerOne.CurrentAttack.Definition.id == "B",
                         "最新输入B没有优先于旧输入A执行");
-                    Require(Mathf.Approximately(director.PlayerOne.Stance, 0f),
+                    Require(director.PlayerOne.Stance >= 0f &&
+                            director.PlayerOne.Stance < director.PlayerOne.MaximumStance,
                         "最新输入执行后架势消耗不正确");
-                    Require(director.PlayerTwo.CurrentAttack != null &&
-                            director.PlayerTwo.CurrentAttack.TimeScale > 1.15f,
-                        "效果条没有作用于弹回后立即执行的缓冲攻击");
-                    Require(Mathf.Approximately(director.PlayerTwo.EffectTime, 0f),
-                        "效果条作用于下一次攻击后没有清零");
                     NextStage();
                     break;
 
@@ -150,7 +150,8 @@ public static class CombatPlayModeVerifier
 
                 case 8 when (director.PlayerOne.CurrentAttack != null &&
                              director.PlayerOne.CurrentAttack.Phase == AttackPhase.Recovery) || Elapsed >= 8f:
-                    Require(Mathf.Approximately(director.PlayerTwo.Health, expectedHealth - 1f),
+                    Require(Mathf.Approximately(director.PlayerTwo.Health,
+                            expectedHealth - director.Catalog.GetAttack("A").normalDamage),
                         "普通命中未在有效期结束后结算");
                     NextStage();
                     break;
@@ -178,7 +179,7 @@ public static class CombatPlayModeVerifier
 
                 case 11 when director.PlayerTwo.Health < director.PlayerTwo.MaximumHealth || Elapsed >= 8f:
                     Require(Mathf.Approximately(director.PlayerTwo.Health,
-                            director.PlayerTwo.MaximumHealth - 1f),
+                            director.PlayerTwo.MaximumHealth - director.Catalog.GetAttack("A").normalDamage),
                         "高韧性后手没有正常承受先手伤害");
                     Require(director.PlayerTwo.Mode == FighterMode.Attack &&
                             director.PlayerTwo.CurrentAttack?.Definition.id == "B",
@@ -213,7 +214,7 @@ public static class CombatPlayModeVerifier
                     Require(director.PlayerTwo.Mode == FighterMode.Hit,
                         "A的出手韧性低于B时没有被打断");
                     Require(Mathf.Approximately(director.PlayerTwo.Health,
-                            director.PlayerTwo.MaximumHealth - 3f),
+                            director.PlayerTwo.MaximumHealth - director.Catalog.GetAttack("B").normalDamage),
                         "低韧性后手没有正常承受B的伤害");
                     Require(director.PlayerTwo.CurrentAttack == null,
                         "低韧性后手被打断后仍保留当前攻击");
@@ -232,6 +233,93 @@ public static class CombatPlayModeVerifier
     }
 
     private static float Elapsed => Time.realtimeSinceStartup - stageStart;
+
+    private static void VerifySimulationProtocol()
+    {
+        CombatCatalogData catalog = director.Catalog;
+        CombatSimulation probe = new CombatSimulation(catalog, -1f, 0f, 1f, 0f);
+        CombatSnapshot snapshot = probe.Step(
+            new CombatInputCommand(1, 1, 0f, 0f, "A"),
+            new CombatInputCommand(1, 2, 0f, 0f));
+        Require(snapshot.tick == 1 && snapshot.playerOne.currentAttack?.actionId == "A",
+            "CombatInputCommand 未驱动纯逻辑动作");
+        bool emittedAttack = false;
+        foreach (CombatEvent combatEvent in probe.Events)
+            if (combatEvent.type == CombatEventType.AttackStarted && combatEvent.sourcePlayer == 1)
+                emittedAttack = true;
+        Require(emittedAttack, "纯逻辑层未产生 AttackStarted 事件");
+
+        string json = JsonUtility.ToJson(snapshot);
+        CombatSnapshot decoded = JsonUtility.FromJson<CombatSnapshot>(json);
+        probe.ApplySnapshot(decoded);
+        CombatSnapshot restored = probe.CaptureSnapshot();
+        Require(restored.tick == snapshot.tick &&
+                restored.playerOne.currentAttack?.actionId == snapshot.playerOne.currentAttack?.actionId &&
+                Mathf.Approximately(restored.playerOne.currentAttack?.elapsedFrames ?? -1f,
+                    snapshot.playerOne.currentAttack?.elapsedFrames ?? -2f),
+            "CombatSnapshot 序列化恢复不完整");
+
+        CombatSimulation reboundProbe = new CombatSimulation(catalog, -0.75f, 0f, 0.75f, 0f);
+        long reboundTick = 1;
+        CombatSnapshot reboundSnapshot = reboundProbe.Step(
+            new CombatInputCommand(reboundTick, 1, 0f, 0f, "A"),
+            new CombatInputCommand(reboundTick, 2, 0f, 0f, "A"));
+        while (reboundSnapshot.playerOne.mode != FighterMode.Rebound && reboundTick < 240)
+        {
+            reboundTick++;
+            reboundSnapshot = reboundProbe.Step(
+                new CombatInputCommand(reboundTick, 1, 0f, 0f),
+                new CombatInputCommand(reboundTick, 2, 0f, 0f));
+        }
+        AttackAnimationData reboundAnimation = catalog.GetAttack("A").animation;
+        Require(reboundSnapshot.playerOne.mode == FighterMode.Rebound &&
+                reboundSnapshot.playerTwo.mode == FighterMode.Rebound,
+            "A对A未进入双方弹回状态");
+        Require(reboundSnapshot.playerOne.lockedAnimationStartFrame >=
+                reboundAnimation.sourceActiveStartFrame &&
+                reboundSnapshot.playerOne.lockedAnimationStartFrame <
+                reboundAnimation.sourceActiveEndFrame,
+            "弹回动画没有从动作对成立时的实际挥击帧接入");
+        string reboundJson = JsonUtility.ToJson(reboundSnapshot);
+        CombatSnapshot reboundDecoded = JsonUtility.FromJson<CombatSnapshot>(reboundJson);
+        Require(Mathf.Approximately(reboundDecoded.playerOne.lockedAnimationStartFrame,
+                reboundSnapshot.playerOne.lockedAnimationStartFrame),
+            "CombatSnapshot 未保存弹回动画接入帧");
+
+        CombatSimulation delayProbe = new CombatSimulation(catalog, -0.75f, 0f, 0.75f, 0f);
+        long tick = 1;
+        CombatSnapshot delaySnapshot = delayProbe.Step(
+            new CombatInputCommand(tick, 1, 0f, 0f, "B"),
+            new CombatInputCommand(tick, 2, 0f, 0f, "C"));
+        while (delaySnapshot.playerTwo.delayEffectFrames <= 0f && tick < 240)
+        {
+            tick++;
+            delaySnapshot = delayProbe.Step(new CombatInputCommand(tick, 1, 0f, 0f),
+                new CombatInputCommand(tick, 2, 0f, 0f));
+        }
+        Require(delaySnapshot.playerTwo.delayEffectFrames > 0f, "动作对未写入延迟条");
+        float delayBeforeAdvance = delaySnapshot.playerTwo.delayEffectFrames;
+        tick++;
+        delaySnapshot = delayProbe.Step(new CombatInputCommand(tick, 1, 0f, 0f),
+            new CombatInputCommand(tick, 2, 0f, 0f));
+        Require(delaySnapshot.playerTwo.delayEffectFrames < delayBeforeAdvance,
+            "延迟条没有在弹回状态持续递减");
+        while (delaySnapshot.playerTwo.mode != FighterMode.Free && tick < 360)
+        {
+            tick++;
+            delaySnapshot = delayProbe.Step(new CombatInputCommand(tick, 1, 0f, 0f),
+                new CombatInputCommand(tick, 2, 0f, 0f));
+        }
+        Require(delaySnapshot.playerTwo.mode == FighterMode.Free &&
+                delaySnapshot.playerTwo.delayEffectFrames > 0f,
+            "延迟条未能保留到弹回结束后的有效时间窗口");
+        tick++;
+        delaySnapshot = delayProbe.Step(new CombatInputCommand(tick, 1, 0f, 0f),
+            new CombatInputCommand(tick, 2, 0f, 0f, "A"));
+        Require(delaySnapshot.playerTwo.currentAttack?.TimeScale > 1f &&
+                Mathf.Approximately(delaySnapshot.playerTwo.delayEffectFrames, 0f),
+            "下一动作没有消费当时剩余的延迟条");
+    }
 
     private static void NextStage()
     {

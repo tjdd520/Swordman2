@@ -169,7 +169,6 @@ namespace Swordman2.Combat
         public int sourceActiveStartFrame = 18;
         public int sourceActiveEndFrame = 38;
         public int sourceEndFrame = 52;
-        public int reboundEntryFrame = 21;
     }
 
     public enum PairParticipantResult { Continue, Rebound }
@@ -299,8 +298,6 @@ namespace Swordman2.Combat
                   animation.sourceActiveStartFrame < animation.sourceActiveEndFrame &&
                   animation.sourceActiveEndFrame < animation.sourceEndFrame))
                 errors.AppendLine($"- 动作 {attack.id} 的动画源分段必须依次递增");
-            if (animation.reboundEntryFrame < animation.sourceStartFrame || animation.reboundEntryFrame > animation.sourceEndFrame)
-                errors.AppendLine($"- 动作 {attack.id} 的弹回进入帧超出动画源范围");
         }
 
         private static void ValidateControls(PlayerControls controls, string label,
