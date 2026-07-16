@@ -128,8 +128,6 @@ namespace Swordman2.Combat
         public string[] pairSequence = Array.Empty<string>();
         public float pairChainWindowSeconds = 1.5f;
         public float pairPredictionLeadSeconds = 0.4f;
-        public float firstPairStartOffsetSeconds = 0.3f;
-        public int sourcePoolSize = 8;
         public float volume = 0.85f;
     }
 
@@ -140,6 +138,7 @@ namespace Swordman2.Combat
         public string displayName;
         public float stanceCost;
         public int normalDamage;
+        public int startupPoise = -1;
         public int windupFrames = 14;
         public int activeFrames = 23;
         public int recoveryFrames = 23;
@@ -254,6 +253,8 @@ namespace Swordman2.Combat
                 if (!attacks.TryAdd(attack.id, attack)) errors.AppendLine($"- 动作 ID 重复：{attack.id}");
                 if (attack.windupFrames <= 0 || attack.activeFrames <= 0 || attack.recoveryFrames <= 0)
                     errors.AppendLine($"- 动作 {attack.id} 的三个逻辑阶段帧数都必须大于 0");
+                if (attack.startupPoise < 0)
+                    errors.AppendLine($"- 动作 {attack.id} 必须配置非负整数 startupPoise");
                 if (attack.radius <= 0f || attack.stanceCost < 0f || attack.normalDamage < 0)
                     errors.AppendLine($"- 动作 {attack.id} 的范围、架势消耗或伤害无效");
                 ValidateAnimation(attack, errors);

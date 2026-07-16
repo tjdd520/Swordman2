@@ -46,7 +46,7 @@ namespace Swordman2.Combat
             get
             {
                 if (ElapsedFrames < WindupFrames) return AttackPhase.Windup;
-                if (ElapsedFrames <= ActiveEndFrames) return AttackPhase.Active;
+                if (ElapsedFrames < ActiveEndFrames) return AttackPhase.Active;
                 if (ElapsedFrames < TotalFrames) return AttackPhase.Recovery;
                 return AttackPhase.Finished;
             }

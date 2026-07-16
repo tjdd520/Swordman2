@@ -234,7 +234,7 @@ namespace Swordman2.Combat
 
         private static void AppendAttack(StringBuilder text, AttackDefinition attack, int frameRate)
         {
-            text.AppendLine($"{attack.id} {attack.displayName}：架势 {attack.stanceCost:0.##}，伤害 {attack.normalDamage}，" +
+            text.AppendLine($"{attack.id} {attack.displayName}：架势 {attack.stanceCost:0.##}，伤害 {attack.normalDamage}，出手韧性 {attack.startupPoise}，" +
                             $"前摇/有效/后摇 {attack.windupFrames}/{attack.activeFrames}/{attack.recoveryFrames}帧，" +
                             $"总时长 {(float)attack.TotalFrames / frameRate:0.###}s，范围 {attack.radius:0.##}m");
         }

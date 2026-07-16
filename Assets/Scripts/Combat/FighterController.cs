@@ -149,6 +149,8 @@ namespace Swordman2.Combat
             animationPlayer.Tick(deltaTime);
             float deltaFrames = deltaTime * settings.logicFrameRate;
             AdvanceInputBuffer(deltaFrames);
+            if (DelayEffectFrames > 0f)
+                DelayEffectFrames = Mathf.Max(0f, DelayEffectFrames - deltaFrames);
 
             if (Mode == FighterMode.Attack && CurrentAttack != null)
             {
@@ -166,7 +168,6 @@ namespace Swordman2.Combat
                 return;
             }
 
-            if (DelayEffectFrames > 0f) DelayEffectFrames = Mathf.Max(0f, DelayEffectFrames - deltaFrames);
             freeElapsedFrames += deltaFrames;
             if (freeElapsedFrames >= settings.stanceRecoveryDelayFrames && Stance < settings.maxStance)
             {
@@ -216,10 +217,11 @@ namespace Swordman2.Combat
             freeElapsedFrames = 0f;
         }
 
-        public void ReceiveNormalHit(int damage)
+        public void ReceiveInterruptingHit(int damage)
         {
             Health = Mathf.Max(0f, Health - damage);
             CurrentAttack = null;
+            ClearInputBuffer();
             Mode = FighterMode.Hit;
             lockedElapsedFrames = 0f;
             lockedDurationFrames = settings.hitReactionFrames;
@@ -227,6 +229,11 @@ namespace Swordman2.Combat
             float duration = lockedDurationFrames / settings.logicFrameRate;
             float speed = animationPlayer.PlaybackSpeedForDuration(animations.hitReaction, duration);
             animationPlayer.Play(animations.hitReaction, false, speed, 0f, animations.hitBlendSeconds, true);
+        }
+
+        public void ReceiveArmoredHit(int damage)
+        {
+            Health = Mathf.Max(0f, Health - damage);
         }
 
         public void ApplyPairDamage(int damage) => Health = Mathf.Max(0f, Health - damage);

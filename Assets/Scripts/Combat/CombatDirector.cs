@@ -109,9 +109,19 @@ namespace Swordman2.Combat
             attacker.MarkAttackSettled();
             if (!attack.HadTemporalOverlap && attack.TargetWasInRange)
             {
-                target.ReceiveNormalHit(attack.Definition.normalDamage);
+                AttackRuntime targetAttack = target.CurrentAttack;
+                bool targetWasInWindup = target.Mode == FighterMode.Attack && targetAttack != null &&
+                                         targetAttack.PreviousPhase == AttackPhase.Windup;
+                bool poiseProtected = targetWasInWindup &&
+                                      targetAttack.Definition.startupPoise > attack.Definition.startupPoise;
+                if (poiseProtected)
+                    target.ReceiveArmoredHit(attack.Definition.normalDamage);
+                else
+                    target.ReceiveInterruptingHit(attack.Definition.normalDamage);
                 combatAudio?.PlayNormalHit();
-                LastEvent = $"P{attacker.PlayerIndex} {attack.Definition.displayName}普通命中 P{target.PlayerIndex}";
+                LastEvent = poiseProtected
+                    ? $"P{attacker.PlayerIndex} {attack.Definition.displayName}命中 P{target.PlayerIndex}，后手以更高出手韧性继续动作"
+                    : $"P{attacker.PlayerIndex} {attack.Definition.displayName}普通命中并打断 P{target.PlayerIndex}";
             }
             else
             {

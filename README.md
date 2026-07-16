@@ -182,6 +182,7 @@ simulationStep = 1 / settings.logicFrameRate
   "displayName": "轻击",
   "stanceCost": 1.0,
   "normalDamage": 1,
+  "startupPoise": 1,
   "windupFrames": 14,
   "activeFrames": 23,
   "recoveryFrames": 23,
@@ -197,6 +198,7 @@ simulationStep = 1 / settings.logicFrameRate
 | `displayName` | UI 和战斗事件显示名称 |
 | `stanceCost` | 启动动作需要消耗的架势 |
 | `normalDamage` | 普通命中伤害 |
+| `startupPoise` | 出手韧性，必须显式配置为非负整数；仅影响前摇被普通命中时是否打断 |
 | `windupFrames` | 前摇逻辑帧数，必须大于 0 |
 | `activeFrames` | 有效期逻辑帧数，必须大于 0 |
 | `recoveryFrames` | 后摇逻辑帧数，必须大于 0 |
@@ -293,7 +295,7 @@ sourceStartFrame
     "result": "Rebound",
     "speedScale": 0.40,
     "damage": 3,
-    "nextAttackDelayFrames": 36
+    "nextAttackDelayFrames": 120
   }
 }
 ```
@@ -307,7 +309,7 @@ sourceStartFrame
 | 字段 | 说明 |
 |---|---|
 | `result` | `Continue` 或 `Rebound` |
-| `speedScale` | 动作对成立后的推进倍率，必须大于 0 |
+| `speedScale` | 动作对成立后立即作用于当前剩余动作或弹回动作的推进倍率，必须大于 0；`1.0` 为正常速度，小于 `1.0` 会减速 |
 | `damage` | 该参与方立即受到的伤害 |
 | `nextAttackDelayFrames` | 该参与方获得的延迟条帧数 |
 
@@ -317,7 +319,7 @@ sourceStartFrame
 
 动作对中的 `nextAttackDelayFrames` 通过 `FighterController.ApplyDelayEffect()` 写入角色延迟条。
 
-自由状态下延迟条按逻辑帧递减。角色下一次成功启动攻击时读取并清空延迟条：
+延迟条在 Free、Attack、Rebound 和 Hit 状态下均按逻辑帧持续递减；游戏暂停时不推进。它不会为了下一动作而暂停或强制保留。角色下一次成功启动攻击时只读取并清空当时的剩余延迟条：
 
 ```text
 追加动作帧 = DelayEffectFrames × delayEffectAttackScale
@@ -325,6 +327,8 @@ TimeScale = (基础总帧 + 追加动作帧) / 基础总帧
 ```
 
 `TimeScale` 按比例影响前摇、有效期和后摇，动画三段继续分别同步。
+
+当前 A+C 和 B+C 的相关参与方配置为 `nextAttackDelayFrames: 120`。在 `logicFrameRate: 120` 下，延迟条自然有效期为 1 秒；如果完整延迟条立刻用于下一动作，且 `delayEffectAttackScale: 2.0`，则会追加 240 逻辑帧，即 2 秒动作时间。动作对当下的 `speedScale` 与黄色延迟条是两套独立效果，不存在其他隐藏动作对缓速。
 
 ## 13. 命中与动作对规则
 
@@ -337,6 +341,15 @@ TimeScale = (基础总帧 + 追加动作帧) / 基础总帧
 - 本次攻击尚未被其他规则结算。
 
 如果有效期有时间重叠但没有满足双方攻击范围，则不会成立动作对，也不会在之后转为普通命中。
+
+当先手有效期结束并产生普通命中，而后手在命中前一逻辑步仍处于攻击前摇时，比较双方动作的 `startupPoise`：
+
+- 后手韧性严格大于先手：正常扣血，但保留当前攻击和缓冲，不播放受击动画；
+- 后手韧性小于或等于先手：正常扣血，取消当前攻击，清空输入缓冲并播放受击动画；
+- 后手不处于攻击前摇：按普通打断受击处理；
+- 生命降到 0 不会强制打断，当前系统允许 0 血继续攻击。
+
+有效期采用半开区间 `[windupFrames, windupFrames + activeFrames)`，配置的有效帧数与固定逻辑步严格一致。同一逻辑步中先手离开有效期、后手离开前摇时，使用后手的 `PreviousPhase` 判断出手韧性。
 
 ## 14. 输入接口
 
@@ -369,11 +382,11 @@ TimeScale = (基础总帧 + 追加动作帧) / 基础总帧
 | `pairSequence` | 连续动作对音效路径数组，播放到末尾后循环 |
 | `pairChainWindowSeconds` | 动作对仍视为连续序列的最大间隔 |
 | `pairPredictionLeadSeconds` | 动作对预测音效最大提前量 |
-| `firstPairStartOffsetSeconds` | 序列第一条音效跳过的开头时长 |
-| `sourcePoolSize` | 允许重叠播放的 AudioSource 数量 |
 | `volume` | AudioSource 音量 |
 
-`CombatDirector.TryPlayPredictedPairAudio()` 根据双方未来有效期交集和当前范围预测动作对，`CombatAudio.PlayActionPair()` 负责序列索引与播放。
+`CombatDirector.TryPlayPredictedPairAudio()` 根据双方未来有效期交集和当前范围预测动作对，`CombatAudio.PlayActionPair()` 负责序列索引与播放。`CombatAudio` 使用一个预加载的二维 `AudioSource`，通过 `PlayOneShot()` 允许音效重叠，不再维护 AudioSource 池或运行时跳过音频开头。
+
+`Assets/Resources/Audio/` 中的战斗音效使用已经裁除前导静音的 WAV/PCM 文件，并启用 `preloadAudioData`。新增或替换短音效时应先清除明显的前导静音，避免把素材空白误判为代码触发延迟。
 
 ## 16. 主要 C# 公开接口
 
@@ -429,7 +442,8 @@ TimeScale = (基础总帧 + 追加动作帧) / 基础总帧
 | `IsInRangeOf(FighterController, float)` | `CombatDirector` 范围判定 |
 | `MarkAttackSettled()` | 标记当前攻击已结算 |
 | `EnterRebound(float)` | 应用动作对弹回结果 |
-| `ReceiveNormalHit(int)` | 应用普通命中和受击锁定 |
+| `ReceiveInterruptingHit(int)` | 扣血、取消攻击、清空缓冲并进入受击锁定 |
+| `ReceiveArmoredHit(int)` | 只扣血，保留当前攻击、动画和输入缓冲 |
 | `ApplyPairDamage(int)` | 应用动作对直接伤害 |
 | `ApplyPairContinuationSpeed(float)` | 应用 Continue 结果的推进倍率 |
 | `ApplyDelayEffect(int)` | 写入延迟条帧数 |
@@ -454,7 +468,7 @@ TimeScale = (基础总帧 + 追加动作帧) / 基础总帧
 
 | 接口 | 用途 |
 |---|---|
-| `Initialize(CombatAudioData)` | 加载音频并建立 AudioSource 池 |
+| `Initialize(CombatAudioData)` | 加载并预载音频，建立一个支持 `PlayOneShot()` 重叠播放的二维 AudioSource |
 | `PlayActionPair(float predictedPairTime)` | 按预测动作对时间推进并播放循环序列 |
 | `PlayNormalHit()` | 播放普通命中音效 |
 
@@ -469,6 +483,7 @@ TimeScale = (基础总帧 + 追加动作帧) / 基础总帧
 - 逻辑帧率、生命和架势基础值；
 - 动作 ID 非空、唯一；
 - 三个逻辑阶段均大于 0；
+- 每个动作显式配置非负整数 `startupPoise`；
 - 攻击范围、架势消耗和伤害有效；
 - 动画源分段严格递增；
 - P1、P2 键名有效且均绑定全部动作；
@@ -491,7 +506,7 @@ N × (N + 1) / 2
 
 1. 在 `attacks` 中增加唯一 ID 为 D 的 `AttackDefinition`。
 2. 填写伤害、架势消耗、三个逻辑阶段和范围。
-3. 填写四个动画片段名和源动画分段。
+3. 填写出手韧性、四个动画片段名和源动画分段。
 4. 在 P1、P2 的 `attacks` 键位数组中分别绑定 D。
 5. 若原有动作是 A、B、C，增加 A+D、B+D、C+D、D+D。
 6. 重新进入 Play Mode，使目录重新加载并校验。

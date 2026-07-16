@@ -152,6 +152,73 @@ public static class CombatPlayModeVerifier
                              director.PlayerOne.CurrentAttack.Phase == AttackPhase.Recovery) || Elapsed >= 8f:
                     Require(Mathf.Approximately(director.PlayerTwo.Health, expectedHealth - 1f),
                         "普通命中未在有效期结束后结算");
+                    NextStage();
+                    break;
+
+                case 9 when (director.PlayerOne.Mode == FighterMode.Free && director.PlayerTwo.Mode == FighterMode.Free) || Elapsed >= 8f:
+                    Require(director.PlayerOne.Mode == FighterMode.Free && director.PlayerTwo.Mode == FighterMode.Free,
+                        "普通命中测试结束后角色未恢复自由状态");
+                    director.PlayerOne.RestoreVitals();
+                    director.PlayerTwo.RestoreVitals();
+                    SetCloseRange();
+                    director.PlayerOne.SubmitAttack("A");
+                    NextStage();
+                    break;
+
+                case 10 when (director.PlayerOne.CurrentAttack != null &&
+                              director.PlayerOne.CurrentAttack.Phase == AttackPhase.Active &&
+                              director.PlayerOne.CurrentAttack.ActiveEndFrames -
+                              director.PlayerOne.CurrentAttack.ElapsedFrames <= 5f) || Elapsed >= 8f:
+                    Require(director.PlayerOne.CurrentAttack != null &&
+                            director.PlayerOne.CurrentAttack.Phase == AttackPhase.Active,
+                        "无法进入高韧性承伤测试时机");
+                    director.PlayerTwo.SubmitAttack("B");
+                    NextStage();
+                    break;
+
+                case 11 when director.PlayerTwo.Health < director.PlayerTwo.MaximumHealth || Elapsed >= 8f:
+                    Require(Mathf.Approximately(director.PlayerTwo.Health,
+                            director.PlayerTwo.MaximumHealth - 1f),
+                        "高韧性后手没有正常承受先手伤害");
+                    Require(director.PlayerTwo.Mode == FighterMode.Attack &&
+                            director.PlayerTwo.CurrentAttack?.Definition.id == "B",
+                        "B的出手韧性高于A时仍被错误打断");
+                    NextStage();
+                    break;
+
+                case 12 when (director.PlayerOne.Mode == FighterMode.Free && director.PlayerTwo.Mode == FighterMode.Free) || Elapsed >= 8f:
+                    Require(director.PlayerOne.Mode == FighterMode.Free && director.PlayerTwo.Mode == FighterMode.Free,
+                        "高韧性换血测试未正常结束");
+                    director.PlayerOne.RestoreVitals();
+                    director.PlayerTwo.RestoreVitals();
+                    SetCloseRange();
+                    director.PlayerOne.SubmitAttack("B");
+                    NextStage();
+                    break;
+
+                case 13 when (director.PlayerOne.CurrentAttack != null &&
+                              director.PlayerOne.CurrentAttack.Phase == AttackPhase.Active &&
+                              director.PlayerOne.CurrentAttack.ActiveEndFrames -
+                              director.PlayerOne.CurrentAttack.ElapsedFrames <= 5f) || Elapsed >= 8f:
+                    Require(director.PlayerOne.CurrentAttack != null &&
+                            director.PlayerOne.CurrentAttack.Phase == AttackPhase.Active,
+                        "无法进入低韧性打断测试时机");
+                    director.PlayerTwo.SubmitAttack("A");
+                    director.PlayerTwo.SubmitAttack("C");
+                    Require(director.PlayerTwo.BufferedInputCount == 1, "打断前未建立输入缓冲");
+                    NextStage();
+                    break;
+
+                case 14 when director.PlayerTwo.Mode == FighterMode.Hit || Elapsed >= 8f:
+                    Require(director.PlayerTwo.Mode == FighterMode.Hit,
+                        "A的出手韧性低于B时没有被打断");
+                    Require(Mathf.Approximately(director.PlayerTwo.Health,
+                            director.PlayerTwo.MaximumHealth - 3f),
+                        "低韧性后手没有正常承受B的伤害");
+                    Require(director.PlayerTwo.CurrentAttack == null,
+                        "低韧性后手被打断后仍保留当前攻击");
+                    Require(director.PlayerTwo.BufferedInputCount == 0,
+                        "低韧性后手被打断后没有清空输入缓冲");
                     stage = 100;
                     EditorApplication.update -= Tick;
                     EditorApplication.ExitPlaymode();
