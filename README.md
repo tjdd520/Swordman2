@@ -1,627 +1,526 @@
-# Swordman2 开发与修改指南
-//hello hello 我是伍天杰
+# Swordman2 战斗系统技术架构与扩展接口
 
-> 文档基于 2026-07-14 的当前代码整理。本文中的“接口/入口”包括公开方法、资源路径、键位入口和常用配置参数，并非网络端口。本项目当前没有网络通信模块或监听端口。
+## 1. 文档范围
 
-## 1. 项目定位与运行环境
+本文面向参与 Swordman2 开发的程序、动画和数值成员，说明当前战斗系统的：
 
-这是一个 Unity 双人本地键盘动作游戏原型
+- 模块边界与文件依赖；
+- 启动、输入、模拟、命中和动画调用链；
+- JSON 数据结构与约束；
+- 主要 C# 类型、公开接口和状态所有权；
+- 新增动作、动作对和动画资源的扩展流程。
 
-- 双人本地输入；
-- 左右分屏、近距离越肩摄像机；
-- 双方自动互相朝向；
-- A/B/C 三种攻击；
-- 输入缓冲、架势、生命、效果延时；
-- 有效期重叠形成“动作对”；
-- 普通命中延迟到有效期结束后确认；
-- 动作对预测音效；
-- 暂停、动态信息和运行时调试数值面板。
+战斗系统采用“C# 固定规则 + JSON 数值配置”结构。JSON 不包含脚本、C# 类型名或其他可执行内容；C# 负责校验数据、执行规则和解释数值。
 
-当前主要环境：
+## 2. 目录与文件职责
 
-| 项目 | 当前值 |
+### 2.1 战斗数据和资源
+
+| 路径 | 职责 |
 |---|---|
-| Unity | 6000.5.2f1 |
-| 渲染管线 | URP 17.5.0 |
-| 输入 | Input System 1.19.0 |
-| UI | UGUI 2.5.0 + IMGUI 调试窗口 |
-| 逻辑模拟频率 | 120 Hz |
-| 动作原始帧率 | 30 FPS |
-| Blender 源文件版本记录 | Blender 5.1.2 |
+| `Swordman2/Assets/Resources/CombatData/combat_catalog.json` | 全局战斗设置、键位、音频、动作和动作对数据 |
+| `Swordman2/Assets/Resources/Models/Swordsman.fbx` | 角色模型和动画片段 |
+| `Swordman2/Assets/Resources/Audio/` | 普通命中和动作对音效 |
+| `New Folder/2.blend` | 角色与动画源工程 |
 
-Unity 项目目录为 `Swordman2/`。场景中的战斗对象绝大部分由代码运行时生成，不依赖手工摆放的玩家 Prefab。
-
-## 2. 目录和脚本职责
-
-### 2.1 Unity 运行时脚本
-
-目录：`Swordman2/Assets/Scripts/Combat/`
+### 2.2 运行时脚本
 
 | 文件 | 主要职责 |
 |---|---|
-| `CombatBootstrap.cs` | 游戏启动入口；创建场地、玩家、战斗控制器、音效、摄像机和 HUD；加载 FBX 与动画。 |
-| `CombatDefinitions.cs` | 攻击枚举、动作阶段、动作配置、动作运行时状态、动作对速度配置。 |
-| `CombatDirector.cs` | 读取双人输入；执行 120 Hz 固定步进；判定普通命中、动作对、范围与预测音效。 |
-| `FighterController.cs` | 单个玩家的生命、架势、移动、攻击、缓冲、效果、受击和动画状态。 |
-| `FighterAnimationPlayer.cs` | 基于 Playables 播放动画、双槽混合、循环、速率自适应。 |
-| `SplitCameraFollow.cs` | 越肩摄像机跟随、平滑移动、持续看向对手。 |
-| `CombatAudio.cs` | 加载音频、动作对连段音效、预测播放、叠音音源池。 |
-| `CombatHud.cs` | 血条/架势条/效果条、事件文字、暂停界面、动态说明、临时数值调节。 |
+| `CombatCatalog.cs` | JSON 数据类型、加载、校验、动作和动作对查询 |
+| `CombatDefinitions.cs` | 运行时枚举和 `AttackRuntime` 动作实例 |
+| `CombatBootstrap.cs` | 启动入口，创建场地、角色、摄像机、音频和 HUD |
+| `CombatDirector.cs` | 输入采集、固定步模拟、普通命中和动作对结算 |
+| `FighterController.cs` | 单角色状态、移动、攻击、缓冲、架势、生命和延迟条 |
+| `FighterAnimationPlayer.cs` | Playables 动画图、混合、播放和攻击动画时间定位 |
+| `CombatAudio.cs` | 音效加载、动作对预测序列和重叠播放 |
+| `CombatHud.cs` | 运行时状态 UI 和动态数据展示 |
+| `SplitCameraFollow.cs` | 分屏越肩摄像机跟随 |
 
-### 2.2 Unity 编辑器脚本
-
-目录：`Swordman2/Assets/Editor/`
-
-| 文件 | 主要职责 |
-|---|---|
-| `SwordsmanModelImporter.cs` | 仅处理 `Resources/Models/Swordsman.fbx`；配置 Generic 动画，设置 Idle/Walk 循环并保留原始位置/朝向。 |
-| `CombatPlayModeVerifier.cs` | 自动进入 Play Mode，依次验证摄像机、HUD、动画、动作对、缓冲、效果和普通命中，并可输出预览图。 |
-
-### 2.3 Blender 与动作数据脚本
-
-目录：`New Folder/`
+### 2.3 编辑器脚本
 
 | 文件 | 主要职责 |
 |---|---|
-| `generate_lowpoly_swordsman.py` | 清空 Blender 场景并生成低多边形剑士、29 根骨骼、12 个动作、预览图和验证报告。 |
-| `export_all_action_frames.py` | 从 `2.blend` 逐帧导出全部骨骼矩阵与关键标记点，生成 JSON/CSV。 |
-| `2.blend` | 当前 Blender 模型与动画源文件。 |
-| `2.fbx` | Blender 导出的 FBX 中间文件。生成脚本本身不会自动导出 FBX。 |
-| `2_validation.json` | 骨骼、动作、网格的生成验证结果。 |
-| `all_action_frames.json` | 12 个动作的完整逐帧骨骼数据，约 41 MB；Unity 运行时不读取。 |
-| `all_action_frame_summary.csv` | 逐帧关键点摘要；Unity 运行时不读取。 |
+| `SwordsmanModelImporter.cs` | 配置 FBX 动画导入、循环和根运动选项 |
+| `CombatPlayModeVerifier.cs` | 战斗系统集成验证入口 |
 
-`Assets/TutorialInfo/` 下的 `Readme.cs` 和 `ReadmeEditor.cs` 是 Unity 模板说明脚本，不参与战斗。
+## 3. 模块依赖
 
-## 3. 总体运行结构
-
-```mermaid
-flowchart TD
-    A["Unity 场景加载完成"] --> B["CombatBootstrap.BuildDemo"]
-    B --> C["加载 Swordsman.fbx 和动画"]
-    B --> D["创建两个 FighterController"]
-    B --> E["创建 CombatDirector + CombatAudio"]
-    B --> F["创建两台 SplitCameraFollow 摄像机"]
-    B --> G["创建 CombatHud"]
-    E --> H["每帧读取输入"]
-    H --> I["120 Hz 固定步进 Simulate"]
-    I --> J["移动 / 朝向 / 动作推进"]
-    J --> K["ResolveCombat"]
-    K --> L["动作对判定"]
-    K --> M["普通命中判定"]
-    K --> N["预测动作对音效"]
-    D --> O["FighterAnimationPlayer"]
-    D --> P["生命 / 架势 / 缓冲 / 效果"]
-    G --> P
+```text
+combat_catalog.json
+        │
+        ▼
+CombatCatalogLoader
+        │  CombatCatalogData
+        ▼
+CombatBootstrap
+        │
+        ├── FighterController × 2
+        │       └── FighterAnimationPlayer
+        │
+        ├── CombatDirector
+        │       ├── FighterController × 2
+        │       └── CombatAudio
+        │
+        ├── CombatHud
+        │       └── CombatDirector
+        │
+        └── SplitCameraFollow × 2
 ```
 
-### 3.1 启动顺序
+依赖方向应保持单向：
 
-`CombatBootstrap.BuildDemo()` 使用 `RuntimeInitializeOnLoadMethod(AfterSceneLoad)` 自动执行：
+- 数据类型不依赖角色、UI 或场景对象；
+- 角色控制器不负责双方战斗规则；
+- 双方交互只由 `CombatDirector` 结算；
+- HUD 只读取公开状态，不写入战斗内部字段；
+- 动画缺失不能中断战斗逻辑。
 
-1. 如果场景已经存在 `CombatDirector`，立即退出，避免重复创建。
-2. 设置目标帧率 120，并关闭 VSync。
-3. 删除场景中已有 Camera。
-4. 运行时创建地面、网格线和方向光。
-5. 从 `Resources/Models/Swordsman` 加载模型和所有动画片段。
-6. 创建 P1/P2，对应初始位置 `(-1.45,0,0)` 与 `(1.45,0,0)`。
-7. 创建 `CombatAudio`、`CombatDirector` 并注入两个玩家。
-8. 创建左右各占屏幕一半的摄像机。
-9. 创建 HUD。
+## 4. 启动和运行流程
 
-因此，如果要把本项目改为正式关卡/Prefab 工作流，需要先决定是否保留该运行时 Bootstrap；否则手工放置的 Camera 会被删除。
+### 4.1 初始化
 
-## 4. 输入和操作
+`CombatBootstrap.BuildDemo()` 通过 `RuntimeInitializeOnLoadMethod` 在场景加载后运行：
 
-### 4.1 双人战斗输入
+1. 检查场景中是否已经存在 `CombatDirector`，防止重复初始化。
+2. 调用 `CombatCatalogLoader.TryLoad()` 读取并校验 JSON。
+3. 设置目标帧率并创建场地。
+4. 从 Resources 加载模型和动画片段。
+5. 创建两个 `FighterController`，互相设置 `Opponent`。
+6. 创建 `CombatAudio` 和 `CombatDirector`。
+7. 创建两个分屏摄像机和一个 `CombatHud`。
 
-| 功能 | P1 | P2 |
-|---|---|---|
-| 前后左右移动 | W / S / A / D | ↑ / ↓ / ← / → |
-| A 轻击 | F | `,` |
-| B 重击 | G | `.` |
-| C 挑飞 | H | `/` |
+JSON 结构或规则数据无效时停止初始化。动画片段缺失只记录警告，战斗逻辑继续可用。
 
-移动是锁定对手后的局部方向：前表示朝向对手，后表示远离，左右表示横向移动。
+### 4.2 每帧与固定逻辑步
 
-### 4.2 系统与调试输入
+`CombatDirector.Update()` 每个 Unity 帧完成输入采集，并把 `Time.deltaTime` 累加到内部 accumulator。随后以：
 
-| 键 | 功能 |
-|---|---|
-| P | 暂停/继续；暂停时 `Time.timeScale=0`，战斗、动画、缓冲和音频停止。 |
-| U | 显示/隐藏动态战斗信息；内容直接读取当前代码配置和实时玩家状态。 |
-| I | 将双方生命与架势恢复到正常上限 5，并恢复 HUD 的正常 0～5 刻度。 |
-| O | 显示/隐藏临时调节窗口；鼠标调整双方生命和架势，临时范围为 0～50。 |
+```text
+simulationStep = 1 / settings.logicFrameRate
+```
 
-`CombatDirector` 在 `Time.timeScale <= 0` 时不读取战斗输入；`CombatHud` 仍会读取 P/U/I/O，因此暂停菜单可以操作。
+重复执行 `Simulate()`。默认逻辑帧率为 120Hz。
 
-## 5. 战斗时序和状态
+每个逻辑步的顺序：
 
-### 5.1 状态枚举
-
-`FighterMode`：
-
-- `Free`：可移动、可立即出招、恢复架势、效果条倒计时。
-- `Attack`：执行攻击，不可移动。
-- `Rebound`：动作对后的弹回锁定。
-- `Hit`：普通命中后的受击锁定。
-
-`AttackPhase`：
-
-- `Windup`：前摇。
-- `Active`：有效期。
-- `Recovery`：后摇。
-- `Finished`：动作结束。
-
-### 5.2 固定步进
-
-`CombatDirector` 每个 Unity `Update` 累积 `Time.deltaTime`，再以 `1/120` 秒步进执行：
-
-1. 写入移动输入；
+1. 设置双方移动输入；
 2. 更新双方朝向；
-3. 移动；
-4. 再次更新朝向；
-5. 推进双方动作；
-6. 统一结算战斗。
+3. 推进移动；
+4. 推进角色状态和动作逻辑帧；
+5. 检查有效期、范围和时间重叠；
+6. 结算动作对或已结束有效期的普通命中。
 
-累积时间最多保留 0.1 秒，防止卡顿后一次补算过多。
+## 5. 时间模型
 
-### 5.3 当前动作时间配置
-
-位置：`CombatDefinitions.cs -> AttackDefinition.New()`。
-
-当前 A/B/C 共用：
-
-| 参数 | 当前值 | 说明 |
-|---|---:|---|
-| `FramesPerSecond` | 30 | 动作配置帧率。 |
-| `GlobalActionSpeed` | 3.5 | 全局动作加速倍率。 |
-| `TotalFrames` | 52 | 总动作帧数。 |
-| `ActiveStartFrame` | 12 | 有效期开始帧。 |
-| `ActiveEndFrame` | 32 | 有效期结束帧。 |
-| `ReboundEntryFrame` | 21 | 弹回动画的归一化起播参考帧。 |
-| `BlendSeconds` | 0.08 | 动画混合时间。 |
-| `Radius` | 2.1 m | 攻击范围。 |
-
-无效果时的实际时间：
+所有战斗时长使用逻辑帧：
 
 ```text
-总时长 = TotalFrames / 30 / GlobalActionSpeed
-有效期开始 = ActiveStartFrame / 30 / GlobalActionSpeed
-有效期结束 = ActiveEndFrame / 30 / GlobalActionSpeed
+实际秒数 = 逻辑帧数 / settings.logicFrameRate
 ```
 
-按当前值：总时长约 0.495 秒，有效期约从 0.114 秒到 0.305 秒，连续时间长度约 0.190 秒。
+音频偏移、动画混合和摄像机平滑等纯表现参数继续使用秒。
 
-注意：A/B/C 当前共用 `New()` 内的帧配置。直接修改会同时影响三种攻击。要单独配置，需要给 `New()` 增加各动作的帧参数或改为独立配置对象。
+每个动作独立保存：
 
-### 5.4 当前攻击基础数据
+- `windupFrames`：前摇；
+- `activeFrames`：有效期；
+- `recoveryFrames`：后摇。
 
-位置：`CombatDefinitions.cs -> AttackDefinition.Create()`。
+动作总帧数由 `AttackDefinition.TotalFrames` 计算，不再存在全局动作速度常量。
 
-| 攻击 | 名称 | 架势消耗 | 普通伤害 | 成功动画 |
-|---|---|---:|---:|---|
-| A | 轻击 | 1 | 1 | 左右斩成功动画交替 |
-| B | 重击 | 2 | 3 | 横扫成功动画 |
-| C | 挑飞 | 1 | 1 | 左右斩成功动画交替；目前没有真正挑飞位移 |
+## 6. JSON 根结构
 
-## 6. 普通命中与动作对规则
+`CombatCatalogData` 对应 JSON 根对象：
 
-### 6.1 范围判定
+```json
+{
+  "settings": {},
+  "commonAnimations": {},
+  "controls": {},
+  "audio": {},
+  "attacks": [],
+  "actionPairs": []
+}
+```
 
-`FighterController.IsInRangeOf()` 同时要求：
+| 节点 | C# 类型 | 内容 |
+|---|---|---|
+| `settings` | `CombatSettings` | 逻辑帧率、生命、架势、移动、缓冲和延迟换算 |
+| `commonAnimations` | `CommonAnimationData` | 待机、移动和受击动画 |
+| `controls` | `CombatControls` | P1、P2 和系统键位 |
+| `audio` | `CombatAudioData` | 音效路径、预测和循环参数 |
+| `attacks` | `AttackDefinition[]` | 动作属性、逻辑阶段和动画源分段 |
+| `actionPairs` | `ActionPairDefinition[]` | 每种无序动作组合的双方结果和数值 |
 
-- 水平距离不超过攻击 `Radius`；
-- 攻击者面对目标，点积不小于 0。
+修改 JSON 后需重新进入 Play Mode，当前不支持运行中热重载。
 
-玩家持续自动朝向对手，所以通常距离是主要条件。
+## 7. 全局设置接口
 
-### 6.2 动作对成立条件
+`CombatSettings` 字段：
 
-动作对必须同时满足：
+| 字段 | 单位 | 说明 |
+|---|---|---|
+| `logicFrameRate` | Hz | 固定战斗逻辑频率 |
+| `maxHealth` | 数值 | 默认生命上限 |
+| `maxStance` | 数值 | 默认架势上限 |
+| `temporaryVitalLimit` | 数值 | 临时调节接口允许的最大值 |
+| `moveSpeed` | m/s | 角色自由移动速度 |
+| `inputBufferFrames` | 逻辑帧 | 最新攻击输入的有效时间 |
+| `stanceRecoveryDelayFrames` | 逻辑帧 | 架势开始恢复前的等待时间 |
+| `stanceRecoveryDurationFrames` | 逻辑帧 | 从 0 恢复到默认满架势所需时间 |
+| `hitReactionFrames` | 逻辑帧 | 普通受击锁定时间 |
+| `delayEffectAttackScale` | 倍率 | 延迟条换算为追加动作帧的倍率 |
 
-1. 两方都存在当前攻击；
-2. 两方当前都处于 `Active`；
-3. 两方分别都在对方攻击范围内；
-4. 两个攻击都尚未 `Settled`。
+## 8. 动作数据接口
 
-动作对一旦结算会标记动作已处理，避免每个固定步重复结算。
+`AttackDefinition` 示例：
 
-### 6.3 动作对结果矩阵
+```json
+{
+  "id": "A",
+  "displayName": "轻击",
+  "stanceCost": 1.0,
+  "normalDamage": 1,
+  "windupFrames": 14,
+  "activeFrames": 23,
+  "recoveryFrames": 23,
+  "radius": 2.1,
+  "blendSeconds": 0.08,
+  "animation": {}
+}
+```
 
-| 组合 | 结果 |
+| 字段 | 说明 |
 |---|---|
-| A + A | 双方弹回，不扣血。 |
-| A + B | 双方弹回，不扣血。 |
-| A + C | 双方弹回；A 方获得 0.3 秒效果。 |
-| B + B | 双方弹回，不扣血。 |
-| B + C | B 方继续成功横扫；C 方弹回、损失 3 血并获得 0.3 秒效果。 |
-| C + C | 双方弹回，不扣血。 |
+| `id` | 唯一动作 ID；键位和动作对均通过字符串 ID 引用 |
+| `displayName` | UI 和战斗事件显示名称 |
+| `stanceCost` | 启动动作需要消耗的架势 |
+| `normalDamage` | 普通命中伤害 |
+| `windupFrames` | 前摇逻辑帧数，必须大于 0 |
+| `activeFrames` | 有效期逻辑帧数，必须大于 0 |
+| `recoveryFrames` | 后摇逻辑帧数，必须大于 0 |
+| `radius` | 攻击范围，必须大于 0 |
+| `blendSeconds` | 切入动作动画时的混合时间 |
+| `animation` | `AttackAnimationData` 动画资源与源分段 |
 
-重要配置：
+`AttackDefinition` 还提供：
 
-- `CombatDirector.BCPairDamage = 3`
-- `CombatDirector.PairEffectDuration = 0.3f`
+| 成员 | 说明 |
+|---|---|
+| `TotalFrames` | 三个逻辑阶段帧数之和 |
+| `SuccessClip(SlashSide)` | 根据挥砍方向选择成功动画 |
+| `ReboundClip(SlashSide)` | 根据挥砍方向选择弹回动画 |
 
-### 6.4 普通命中规则
+## 9. 动画分段接口
 
-普通命中不会在有效期刚碰到目标时立即发生，而是在攻击有效期结束后统一确认：
+`AttackAnimationData` 保存动画片段名和 FBX 源动作的阶段位置：
 
-1. 攻击的有效期已经结束；
-2. 整个有效期内和对方有效期没有任何时间重叠；
-3. 有效期内至少有一个固定步目标在攻击范围内。
+```json
+{
+  "successRightToLeft": "Attack_RtoL_Success",
+  "successLeftToRight": "Attack_LtoR_Success",
+  "reboundRightToLeft": "Attack_RtoL_Blocked",
+  "reboundLeftToRight": "Attack_LtoR_Blocked",
+  "sourceFrameRate": 30.0,
+  "sourceStartFrame": 1,
+  "sourceActiveStartFrame": 18,
+  "sourceActiveEndFrame": 38,
+  "sourceEndFrame": 52,
+  "reboundEntryFrame": 21
+}
+```
 
-满足后才调用目标的 `ReceiveNormalHit()`。
-
-只要双方有效期曾经重叠，即使当时距离不足以形成动作对，也不会再结算普通命中。该行为由 `HadTemporalOverlap` 保证。
-
-## 7. 动作对成立后的独立速度
-
-位置：`CombatDefinitions.cs -> PairActionSpeed`。
-
-这些倍率只控制动作对成立后的剩余动画和锁定时间；成立前仍由 `GlobalActionSpeed` 控制。数值大于 1 加快，小于 1 减慢。
-
-| 参数 | 当前值 | 对应方 |
-|---|---:|---|
-| `AA` | 0.48 | A+A 双方 |
-| `AB_A` | 0.40 | A+B 中 A 方 |
-| `AB_B` | 0.30 | A+B 中 B 方 |
-| `AC_A` | 0.45 | A+C 中 A 方 |
-| `AC_C` | 0.50 | A+C 中 C 方 |
-| `BB` | 0.30 | B+B 双方 |
-| `BC_B` | 0.35 | B+C 中 B 方 |
-| `BC_C` | 0.40 | B+C 中 C 方 |
-| `CC` | 0.60 | C+C 双方 |
-
-弹回方通过 `EnterRebound(multiplier)` 同步改变动画速度与锁定时长。B+C 中 B 方不弹回，而是通过 `ApplyPairContinuationSpeed()` 同步加速或减速当前成功动画和逻辑时间。
-
-## 8. 架势、输入缓冲和效果延时
-
-### 8.1 架势
-
-位置：`FighterController.cs`。
-
-- 正常上限：5；
-- 自由状态持续 0.3 秒后开始恢复；
-- 恢复速度：`5 / 1.5`，即约 3.333/秒；
-- 攻击、弹回和受击期间不恢复；
-- 架势不足时攻击不能立即开始，会进入输入缓冲。
-
-### 8.2 输入缓冲
-
-- 只保留最新攻击输入；
-- 有效期 `InputBufferLifetime = 0.4f`；
-- 新攻击会替换旧攻击并重新计时；
-- 缓冲计时在攻击、弹回和受击期间继续；
-- 0.4 秒内角色恢复可行动且架势足够，则执行缓冲；
-- 超时会清除，不能一直等架势恢复后自动出招。
-
-### 8.3 效果延时
-
-动作对效果由 `EffectTime` 保存。效果在攻击/弹回/受击期间冻结，只在 `Free` 状态倒计时。
-
-下一次攻击开始时：
+逻辑帧与动画源帧相互独立：
 
 ```text
-延时后动作总时长 = 基础总时长 + 剩余效果时间 × EffectDelayStrength
+逻辑前摇   → sourceStartFrame 至 sourceActiveStartFrame
+逻辑有效期 → sourceActiveStartFrame 至 sourceActiveEndFrame
+逻辑后摇   → sourceActiveEndFrame 至 sourceEndFrame
 ```
 
-当前：
+`AttackRuntime.SourceAnimationTime` 按当前逻辑阶段分别插值源动画时间，`FighterController.Advance()` 每个逻辑步调用 `FighterAnimationPlayer.SetCurrentTime()`。因此单独改变某一逻辑阶段只会拉伸或压缩对应动画区段。
 
-- `PairEffectDuration = 0.3 秒`
-- `EffectDelayStrength = 2`
+源分段必须满足：
 
-如果完整效果立即作用于下一次攻击，则额外增加 0.6 秒。动画播放速度、动作总时长和有效期会一起按 `TimeScale` 延长，然后效果清零。
+```text
+sourceStartFrame
+  < sourceActiveStartFrame
+  < sourceActiveEndFrame
+  < sourceEndFrame
+```
 
-## 9. 动画系统
+`reboundEntryFrame` 必须位于源动画起止范围内。
 
-### 9.1 动画资源名称
+## 10. 动作运行时接口
 
-运行时要求 FBX 中存在：
+`AttackRuntime` 是一次具体攻击的运行实例，不写回 JSON。
 
-- `Idle_TwoHand_Sword`
-- `Walk_Forward`
-- `Walk_Backward`
-- `Walk_Left`
-- `Walk_Right`
-- `Attack_RtoL_Success`
-- `Attack_RtoL_Blocked`
-- `Attack_LtoR_Success`
-- `Attack_LtoR_Blocked`
-- `Attack_Horizontal_Success`
-- `Attack_Horizontal_Blocked`
-- `Hit_Reaction_Front`
+重要成员：
 
-`CombatBootstrap.ValidateClips()` 会在缺失时输出错误。
-
-### 9.2 播放方式
-
-`FighterAnimationPlayer`：
-
-- 清空 Animator Controller，使用 `PlayableGraph`；
-- 两个 `AnimationClipPlayable` 槽位交替播放并混合；
-- `PlaybackSpeedForDuration()` 用 FBX 片段真实长度除以逻辑目标时长，使动画自动适应动作配置；
-- `MultiplyCurrentSpeed()` 用于 B+C 中 B 方动作对后的继续动画；
-- Idle 和 Walk 循环，攻击/弹回/受击不循环；
-- Walk 播放速度使用 `MoveSpeed / 0.68` 匹配位移速度；
-- 模型视觉节点局部旋转 Y=180°，修正 Blender/Unity 前向差异；
-- `Animator.applyRootMotion=false`，移动完全由 `CharacterController` 驱动。
-
-### 9.3 修改动画时的注意事项
-
-- 改 `TotalFrames` 会改变逻辑时长，动画会通过播放速度适应。
-- 改 `ActiveStartFrame/ActiveEndFrame` 只改变逻辑有效期，不会自动修改 FBX 动作姿势；应确保有效帧对应剑真正经过目标的位置。
-- 改 `ReboundEntryFrame` 会改变弹回片段的归一化起播位置。
-- FBX 动作重命名后必须同步修改 `SuccessClip()`、`ReboundClip()`、Bootstrap 验证名单和导入/生成脚本。
-
-## 10. 摄像机
-
-### 10.1 创建参数
-
-`CombatBootstrap.BuildCamera()`：
-
-| 参数 | 当前值 |
-|---|---:|
-| 左右视口 | P1: 0～0.5；P2: 0.5～1 |
-| FOV | 63 |
-| Near Clip | 0.05 |
-| Far Clip | 80 |
-| AudioListener | 仅 P1 摄像机 |
-
-### 10.2 跟随参数
-
-`SplitCameraFollow.cs`：
-
-| 参数 | 当前值 | 影响 |
-|---|---:|---|
-| `Distance` | 1.15 | 摄像机在玩家后方距离。 |
-| `Height` | 2.2 | 摄像机高度。 |
-| `ShoulderOffset` | 0.7 | 右肩横向偏移。 |
-| `Smoothness` | 12 | 跟随与旋转平滑度。 |
-
-摄像机始终以对手水平位置定义前向，观察点为对手位置上方 1.18 米。
-
-## 11. 音效系统
-
-### 11.1 资源路径
-
-目录：`Swordman2/Assets/Resources/Audio/`
-
-| 文件 | 用途 |
+| 成员 | 说明 |
 |---|---|
-| `PerfectParry4.mp3` | 动作对连段第 1 个音效。 |
-| `PerfectParry5.mp3` | 动作对连段第 2 个音效。 |
-| `PerfectParry6.mp3` | 动作对连段第 3 个音效。 |
-| `NormalHit.mp3` | 普通命中；源素材对应“完美弹反7”。 |
+| `Definition` | 本次动作引用的静态 `AttackDefinition` |
+| `Side` | 本次挥砍方向 |
+| `ElapsedFrames` | 已推进的运行逻辑帧 |
+| `TimeScale` | 延迟条作用后整段动作的时间倍率 |
+| `RuntimeSpeed` | 动作对成立后继续动作的推进倍率 |
+| `PreviousPhase` / `Phase` | 上一逻辑步和当前动作阶段 |
+| `HadTemporalOverlap` | 有效期是否曾与对方有效期重叠 |
+| `HadMutualRangeOverlap` | 是否曾在双方有效期内互相满足范围 |
+| `TargetWasInRange` | 本方有效期内目标是否曾进入范围 |
+| `Settled` | 本次攻击是否已经结算 |
+| `PairAudioPlayed` | 本次动作对预测音效是否已触发 |
+| `ActualActiveStart/End` | 考虑延迟后的有效期秒数边界 |
+| `SourceAnimationTime` | 当前逻辑帧对应的动画源时间 |
 
-### 11.2 当前逻辑和参数
+## 11. 动作对数据接口
 
-`CombatAudio.cs`：
+动作对采用无序组合，每种组合只保存一条：
 
-| 参数 | 当前值 | 说明 |
-|---|---:|---|
-| `PairChainWindow` | 1.5 秒 | 两次动作对预测时间差不超过该值则继续连段。 |
-| `PairPredictionLead` | 1 秒 | 最多提前多久播放动作对音效。 |
-| `Perfect4StartOffset` | 0.3 秒 | 音效 4 从资源的 0.3 秒处开始播放。 |
-| `SourcePoolSize` | 8 | 可并行使用的 AudioSource 数量。 |
+```json
+{
+  "firstAction": "B",
+  "secondAction": "C",
+  "displayName": "B对C",
+  "first": {
+    "result": "Continue",
+    "speedScale": 0.35,
+    "damage": 0,
+    "nextAttackDelayFrames": 0
+  },
+  "second": {
+    "result": "Rebound",
+    "speedScale": 0.40,
+    "damage": 3,
+    "nextAttackDelayFrames": 36
+  }
+}
+```
 
-连段序列为 `4 → 5 → 6 → 4 → ...`。超过 1.5 秒后重置到 4。
+`first` 永远对应 `firstAction`，`second` 永远对应 `secondAction`，不表示 P1/P2。运行时 `CombatCatalogData.GetPair()` 返回 `swapped`，由 `CombatDirector` 将双方数据映射到实际玩家。
 
-动作对音效预测会计算两个攻击的实际有效期（包括效果延时），并要求预测时刻存在时间重叠且双方在攻击范围内。攻击状态下玩家不能移动，因此双方动作都开始后，距离预测是确定的。每组攻击通过 `PairAudioPlayed` 保证只播一次；如果没能提前播放，动作对实际成立时补播。
+动作 ID 必须按不区分大小写的升序保存，例如 B+C，不能保存 C+B。
 
-普通命中音效只在普通命中正式结算时播放，不预测。
+`PairParticipantData` 字段：
 
-## 12. HUD、暂停和临时调试
+| 字段 | 说明 |
+|---|---|
+| `result` | `Continue` 或 `Rebound` |
+| `speedScale` | 动作对成立后的推进倍率，必须大于 0 |
+| `damage` | 该参与方立即受到的伤害 |
+| `nextAttackDelayFrames` | 该参与方获得的延迟条帧数 |
 
-`CombatHud` 在运行时创建整个 Canvas：
+`Continue` 由 `ApplyPairContinuationSpeed()` 处理；`Rebound` 由 `EnterRebound()` 处理。JSON 只选择固定结果并提供数值。
 
-- 左右玩家面板；
-- 生命、架势、效果三条进度条；
-- 底部最近战斗事件；
-- U 动态说明面板；
-- P 暂停遮罩；
-- O IMGUI 临时数值窗口。
+## 12. 延迟条机制
 
-正常生命/架势上限是 5。O 面板调用 `SetTemporaryVitals()` 后，该玩家使用 0～50 的临时显示刻度；生命和架势可以暂时超过正常上限。I 调用 `RestoreVitals()` 后数值回到 5，显示刻度也回到 0～5。
+动作对中的 `nextAttackDelayFrames` 通过 `FighterController.ApplyDelayEffect()` 写入角色延迟条。
 
-动态 U 面板不是固定说明文字，它会实时读取：
+自由状态下延迟条按逻辑帧递减。角色下一次成功启动攻击时读取并清空延迟条：
 
-- 当前 A/B/C 伤害和架势消耗；
-- 全局动作速度、总时长、有效期和范围；
-- 动作对各方速度倍率；
-- B+C 伤害、效果持续时间与延时强度；
-- 音效提前量；
-- 双方实时生命、架势、效果、状态和缓冲数量。
+```text
+追加动作帧 = DelayEffectFrames × delayEffectAttackScale
+TimeScale = (基础总帧 + 追加动作帧) / 基础总帧
+```
 
-## 13. 重要公开接口
+`TimeScale` 按比例影响前摇、有效期和后摇，动画三段继续分别同步。
 
-### 13.1 `CombatDirector`
+## 13. 命中与动作对规则
+
+双方同时处于 `AttackPhase.Active` 时记录有效期重叠；同时互相满足攻击范围且均未结算时成立动作对。
+
+普通命中只在本方有效期结束后结算，必须同时满足：
+
+- 本方有效期内目标曾进入攻击范围；
+- 本方有效期与对方有效期没有任何时间重叠；
+- 本次攻击尚未被其他规则结算。
+
+如果有效期有时间重叠但没有满足双方攻击范围，则不会成立动作对，也不会在之后转为普通命中。
+
+## 14. 输入接口
+
+`CombatControls` 包含两个 `PlayerControls` 和一个 `SystemControls`。
+
+`PlayerControls`：
+
+| 字段 | 说明 |
+|---|---|
+| `moveLeft/Right/Down/Up` | Unity Input System `Key` 名称 |
+| `attacks` | `AttackBinding[]`，把动作 ID 绑定到键名 |
+
+`AttackBinding`：
+
+```json
+{ "action": "A", "key": "F" }
+```
+
+每个玩家必须绑定全部动作。键名通过 `Enum.TryParse<Key>()` 转换，无效键名会使目录校验失败。
+
+攻击缓冲由 `FighterController.SubmitAttack()` 管理：只保留最新动作，新的输入会替换旧输入并重置缓冲帧数。
+
+## 15. 音频接口
+
+`CombatAudioData`：
+
+| 字段 | 说明 |
+|---|---|
+| `normalHit` | 普通命中音效 Resources 路径 |
+| `pairSequence` | 连续动作对音效路径数组，播放到末尾后循环 |
+| `pairChainWindowSeconds` | 动作对仍视为连续序列的最大间隔 |
+| `pairPredictionLeadSeconds` | 动作对预测音效最大提前量 |
+| `firstPairStartOffsetSeconds` | 序列第一条音效跳过的开头时长 |
+| `sourcePoolSize` | 允许重叠播放的 AudioSource 数量 |
+| `volume` | AudioSource 音量 |
+
+`CombatDirector.TryPlayPredictedPairAudio()` 根据双方未来有效期交集和当前范围预测动作对，`CombatAudio.PlayActionPair()` 负责序列索引与播放。
+
+## 16. 主要 C# 公开接口
+
+### 16.1 CombatCatalogLoader
 
 | 接口 | 用途 |
 |---|---|
-| `Initialize(p1, p2, audio)` | 注入双方玩家与音效系统，建立对手引用。 |
-| `PlayerOne / PlayerTwo` | HUD、测试和外部系统访问双方状态。 |
-| `LastEvent` | HUD 显示最近一次战斗结果。 |
+| `TryLoad(out CombatCatalogData)` | 从 Resources 加载、解析并校验目录 |
+| `Validate(CombatCatalogData)` | 返回合并后的校验错误文本；空字符串表示通过 |
 
-### 13.2 `FighterController`
-
-| 接口 | 用途 |
-|---|---|
-| `SubmitAttack(kind)` | 提交攻击；可能立即执行或进入 0.4 秒缓冲。 |
-| `SetMovementInput(input)` | 写入当前移动输入。 |
-| `Advance(deltaTime)` | 推进动画、动作、缓冲、效果和架势恢复。 |
-| `UpdateMovement(deltaTime)` | 仅自由状态移动。 |
-| `UpdateFacing()` | 朝向对手。 |
-| `IsInRangeOf(target, radius)` | 距离与朝向判定。 |
-| `MarkAttackSettled()` | 标记当前攻击已经结算。 |
-| `EnterRebound(speed)` | 进入弹回并同步动画/逻辑速度。 |
-| `ReceiveNormalHit(damage)` | 扣血并进入受击状态。 |
-| `ApplyPairDamage(damage)` | 动作对直接扣血，不进入普通受击动画。 |
-| `ApplyPairContinuationSpeed(speed)` | 调节仍继续成功动作的一方。 |
-| `ApplyEffect(seconds)` | 增加效果条。 |
-| `RestoreVitals()` | 正常回满并退出临时 50 刻度。 |
-| `SetTemporaryVitals(hp, stance)` | O 面板临时设置 0～50。 |
-| `Teleport(position)` | 测试或关卡逻辑瞬移。 |
-| `DebugState()` | HUD/测试使用的可读状态。 |
-
-### 13.3 `CombatAudio`
+### 16.2 CombatCatalogData
 
 | 接口 | 用途 |
 |---|---|
-| `Initialize()` | 从 Resources 加载 4 个音频并创建音源池。 |
-| `PlayActionPair(predictedPairTime)` | 根据动作对时间推进 4/5/6 连段。 |
-| `PlayNormalHit()` | 播放普通命中。 |
-| `PairChainIndex` | 当前连段索引，0/1/2 对应 4/5/6。 |
-| `LastPlayedClipName` | 最近播放的片段名，便于调试。 |
+| `GetAttack(string id)` | 不区分大小写查询动作 |
+| `GetPair(string firstAction, string secondAction, out bool swapped)` | 查询无序动作对并返回参数是否交换 |
+| `RebuildLookups()` | 数据重新构造后重建运行时查询表 |
 
-## 14. 常用修改入口速查
+### 16.3 CombatDirector
 
-| 需求 | 修改位置 |
+| 成员 | 用途 |
 |---|---|
-| 全局攻击速度 | `CombatDefinitions.cs -> GlobalActionSpeed` |
-| A/B/C 架势消耗和普通伤害 | `CombatDefinitions.cs -> AttackDefinition.Create()` |
-| 总帧、有效帧、弹回帧、范围 | `CombatDefinitions.cs -> AttackDefinition.New()` |
-| 各动作对成立后速度 | `CombatDefinitions.cs -> PairActionSpeed` |
-| B+C 动作对伤害 | `CombatDirector.cs -> BCPairDamage` |
-| 效果条持续时间 | `CombatDirector.cs -> PairEffectDuration` |
-| 效果对下一动作的延时强度 | `FighterController.cs -> EffectDelayStrength` |
-| 正常生命/架势上限 | `FighterController.cs -> MaxHealth / MaxStance` |
-| O 调试窗口临时上限 | `FighterController.cs -> TemporaryVitalLimit` |
-| 架势恢复延迟/速度 | `FighterController.cs -> StanceRecoveryDelay / StanceRecoveryRate` |
-| 输入缓冲寿命 | `FighterController.cs -> InputBufferLifetime` |
-| 移动速度 | `FighterController.cs -> MoveSpeed` |
-| 步行动画匹配基准 | `FighterController.PlayFreeAnimation() -> 0.68f` |
-| 普通受击时长 | `FighterController.cs -> HitDuration` |
-| 摄像机位置和平滑 | `SplitCameraFollow.cs` |
-| 摄像机 FOV/裁剪面 | `CombatBootstrap.BuildCamera()` |
-| 音效提前/连段/片头跳过 | `CombatAudio.cs` 顶部常量 |
-| 音效音量 | `CombatAudio.Initialize() -> source.volume` |
-| UI 尺寸、字体、颜色 | `CombatHud.cs` 各 Build 方法 |
-| 双人键位 | `CombatDirector.ReadInput()` |
-| P/U/I/O 功能键 | `CombatHud.Update()` |
-| FBX 循环和导入设置 | `SwordsmanModelImporter.cs` |
+| `Initialize(FighterController, FighterController, CombatAudio, CombatCatalogData)` | 注入双方角色、音频和目录 |
+| `Catalog` | 当前只读战斗目录 |
+| `PlayerOne` / `PlayerTwo` | 双方控制器 |
+| `LastEvent` | 最近一次战斗事件文本 |
 
-## 15. 典型功能修改方法
+双方交互规则应添加在 `CombatDirector`，不要放入单个 `FighterController`。
 
-### 15.1 给 A/B/C 设置不同有效帧
+### 16.4 FighterController
 
-当前三者共用 `New()`。建议扩展为：
+状态读取接口：
 
-```csharp
-New(kind, name, stance, damage, totalFrames, activeStart, activeEnd, reboundFrame)
-```
+| 成员 | 用途 |
+|---|---|
+| `Mode` | 当前 Free、Attack、Rebound 或 Hit |
+| `CurrentAttack` | 当前攻击实例；非攻击状态为 null |
+| `Health` / `Stance` | 当前生命和架势 |
+| `DelayEffectFrames` | 当前延迟条逻辑帧 |
+| `Position` / `Facing` | 战斗根节点位置与水平朝向 |
+| `CurrentAnimation` | 当前动画片段名称 |
+| `BufferedInputCount` | 当前缓冲输入数量 |
 
-然后在 `Create()` 的 A/B/C 分支分别传值。不要只修改动画资源而不修改逻辑帧。
+控制和结算接口：
 
-### 15.2 增加新攻击 D
+| 接口 | 调用方/用途 |
+|---|---|
+| `SetMovementInput(Vector2)` | `CombatDirector` 写入本逻辑步移动输入 |
+| `SubmitAttack(string)` | 输入层或其他系统提交动作 ID |
+| `UpdateFacing()` | 朝向锁定目标 |
+| `UpdateMovement(float)` | 推进自由移动 |
+| `Advance(float)` | 推进状态、动画、架势和缓冲 |
+| `IsInRangeOf(FighterController, float)` | `CombatDirector` 范围判定 |
+| `MarkAttackSettled()` | 标记当前攻击已结算 |
+| `EnterRebound(float)` | 应用动作对弹回结果 |
+| `ReceiveNormalHit(int)` | 应用普通命中和受击锁定 |
+| `ApplyPairDamage(int)` | 应用动作对直接伤害 |
+| `ApplyPairContinuationSpeed(float)` | 应用 Continue 结果的推进倍率 |
+| `ApplyDelayEffect(int)` | 写入延迟条帧数 |
+| `RestoreVitals()` | 恢复默认生命和架势 |
+| `SetTemporaryVitals(float, float)` | 设置临时生命和架势 |
+| `Teleport(Vector3)` | 调试或场景系统安全移动 CharacterController |
+| `Dispose()` | 销毁角色动画 PlayableGraph |
 
-至少需要同步：
+### 16.5 FighterAnimationPlayer
 
-1. 给 `AttackKind` 增加 D；
-2. 在 `AttackDefinition.Create()` 创建 D 配置；
-3. 给 D 设置成功/弹回动画映射；
-4. 在 `CombatDirector.ReadInput()` 增加键位；
-5. 扩展动作对矩阵和结果逻辑；
-6. 扩展 `PairActionSpeed`；
-7. 在 Blender/FBX 中增加动画；
-8. 扩展 `ValidateClips()`、导入规则、动态 U 信息和自动验证。
+| 接口 | 用途 |
+|---|---|
+| `HasClip(string)` | 查询动画片段是否存在 |
+| `PlaybackSpeedForDuration(string, float)` | 计算完整动画匹配目标时长的速度 |
+| `SetCurrentTime(float)` | 把攻击动画定位到逻辑阶段对应源时间 |
+| `ClipDuration(string)` | 查询动画长度 |
+| `Play(...)` | 播放并混合动画；缺失片段时只警告 |
+| `Tick(float)` | 推进循环和混合状态 |
+| `Dispose()` | 销毁 PlayableGraph |
 
-### 15.3 修改动作对规则
+### 16.6 CombatAudio
 
-入口是 `CombatDirector.ResolveActionPair()`。建议保持当前模式：先计算双方结果，再统一修改双方状态，避免 P1/P2 调用顺序改变结果。
+| 接口 | 用途 |
+|---|---|
+| `Initialize(CombatAudioData)` | 加载音频并建立 AudioSource 池 |
+| `PlayActionPair(float predictedPairTime)` | 按预测动作对时间推进并播放循环序列 |
+| `PlayNormalHit()` | 播放普通命中音效 |
 
-如果新增动作对伤害，优先把数值提取为公开常量或配置字段，再让 U 面板和测试引用同一个值，避免界面/测试写死旧数值。
+### 16.7 CombatHud
 
-### 15.4 修改音频文件
+`Initialize(CombatDirector)` 注入唯一数据源。HUD 通过 `CombatDirector` 和双方 `FighterController` 读取状态，不应持有独立战斗数值副本。
 
-保持 `Resources/Audio` 下英文资源名，或同步修改 `CombatAudio.Initialize()` 中的 Resources 路径。Unity 加载 Resources 时路径不写扩展名。
+## 17. 数据校验契约
 
-### 15.5 改为 Inspector/ScriptableObject 配置
+`CombatCatalogLoader.Validate()` 检查：
 
-目前大量参数是 `const`，适合原型快速迭代，但每次修改都需要重新编译。正式化时建议优先迁移：
+- 逻辑帧率、生命和架势基础值；
+- 动作 ID 非空、唯一；
+- 三个逻辑阶段均大于 0；
+- 攻击范围、架势消耗和伤害有效；
+- 动画源分段严格递增；
+- P1、P2 键名有效且均绑定全部动作；
+- 动作对引用有效、顺序正确且不重复；
+- 动作对数量完整；
+- `result` 只能为 Continue 或 Rebound；
+- 动作对速度、伤害和延迟数值有效。
 
-- `AttackDefinition` → 每种攻击一个 ScriptableObject；
-- `PairActionSpeed` → 动作对矩阵配置；
-- 摄像机/音频/UI 常量 → 可序列化配置组件；
-- HUD 动态说明继续读取同一配置源。
-
-## 16. 模型与动作资源工作流
-
-### 16.1 重新生成 Blender 源文件
-
-在带 `bpy` 的 Blender Python 环境运行：
-
-```powershell
-blender --background --python "New Folder/generate_lowpoly_swordsman.py"
-```
-
-会覆盖/生成：
-
-- `New Folder/2.blend`
-- `New Folder/2_preview.png`
-- `New Folder/2_validation.json`
-
-脚本会清空当前 Blender 场景，必须以后台新进程或确认无未保存内容的 Blender 文件运行。
-
-### 16.2 导出逐帧数据
-
-让 Blender 打开 `2.blend` 后执行：
-
-```powershell
-blender --background "New Folder/2.blend" --python "New Folder/export_all_action_frames.py"
-```
-
-生成完整 JSON 和 CSV。它们用于分析/验证，不被 Unity 运行时加载。
-
-### 16.3 FBX 到 Unity
-
-当前生成脚本不含 FBX 导出步骤。需要从 Blender 导出 FBX，再复制/覆盖：
+N 个动作必须存在：
 
 ```text
-Swordman2/Assets/Resources/Models/Swordsman.fbx
+N × (N + 1) / 2
 ```
 
-Unity 会由 `SwordsmanModelImporter` 自动应用导入设置。覆盖后检查 Console 是否有缺少动画的错误。
+条无序动作对。
 
-## 17. 验证与调试
+## 18. 新增动作流程
 
-### 17.1 运行时人工检查
+新增动作 D：
 
-建议每次改战斗参数后至少验证：
+1. 在 `attacks` 中增加唯一 ID 为 D 的 `AttackDefinition`。
+2. 填写伤害、架势消耗、三个逻辑阶段和范围。
+3. 填写四个动画片段名和源动画分段。
+4. 在 P1、P2 的 `attacks` 键位数组中分别绑定 D。
+5. 若原有动作是 A、B、C，增加 A+D、B+D、C+D、D+D。
+6. 重新进入 Play Mode，使目录重新加载并校验。
 
-1. A+A 是否双方弹回且不扣血；
-2. B+C 是否 B 继续、C 弹回并扣当前配置伤害；
-3. A+C 是否只给 A 效果；
-4. 有效期不重叠时普通命中是否在有效期结束后发生；
-5. 有效期曾重叠但距离不足时是否双方都不普通命中；
-6. 架势不足的缓冲是否在 0.4 秒后删除；
-7. 效果是否按 `EffectDelayStrength` 延长下一动作；
-8. 动作对音效是否按 4/5/6 循环且不重复；
-9. P/U/I/O 是否在暂停与运行状态都符合预期；
-10. UI 数字与条形比例是否同步。
+只使用 Continue、Rebound、伤害、速度和延迟条时无需修改 C#。
 
-### 17.2 C# 编译检查
+## 19. 扩展全新动作对效果
 
-在 Unity 已生成 `.csproj` 后可执行：
+当新效果不能由现有字段表达时，应按以下边界扩展：
 
-```powershell
-dotnet build Swordman2/Assembly-CSharp.csproj --no-restore
-dotnet build Swordman2/Assembly-CSharp-Editor.csproj --no-restore
-```
+1. 在 `PairParticipantData` 增加纯数据字段；
+2. 在 `CombatCatalogLoader.ValidateParticipant()` 增加约束；
+3. 在 `CombatDirector.ApplyPairValues()` 或 `ApplyPairResult()` 解释该字段；
+4. 如效果只影响单角色内部状态，再由 `CombatDirector` 调用新的 `FighterController` 接口；
+5. JSON 仍不得保存脚本名、类名或任意可执行内容。
 
-Unity 生成的项目可能产生 NUnit/目标框架版本警告；重点检查是否存在 C# 编译错误。
+保持“目录选择与提供数值，C# 定义规则语义”的设计边界。
 
-### 17.3 自动 Play Mode 验证
+## 20. 有意保留在 C# 的规则
 
-关闭正在占用项目的 Unity Editor 后，可以调用：
+以下规则不应转移到 JSON：
 
-```powershell
-& "C:\Program Files\Unity\Hub\Editor\6000.5.2f1\Editor\Unity.exe" `
-  -batchmode `
-  -projectPath "D:\0000\app_codex\swordman2\Swordman2" `
-  -executeMethod CombatPlayModeVerifier.Run `
-  -logFile "D:\0000\app_codex\swordman2\Swordman2\combat-verification.log"
-```
+- 有效期重叠的检测方法；
+- 动作对要求双方有效期同时成立且互相满足范围；
+- 普通命中在有效期结束后确认；
+- 输入缓冲只保留最新动作；
+- 延迟条的消费时机和状态生命周期；
+- Continue、Rebound、Hit 的状态切换；
+- 动画缺失时逻辑继续执行；
+- 固定逻辑步的推进顺序。
 
-验证脚本成功时输出 `VERIFY_PASS`，失败时输出 `VERIFY_FAIL`，并在有图形设备时生成 `combat-preview.png`。
-
+JSON 决定动作、资源、键位、选择和数值；C# 保证规则稳定、可检查且可扩展。
