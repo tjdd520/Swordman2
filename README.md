@@ -589,3 +589,232 @@ CombatSimulation
 - 不传输 Animator、GameObject、HUD 或 AudioSource 状态，这些均由客户端根据快照和事件重建。
 
 预测、回滚和插值应建立在命令与快照之上，不要让网络层直接修改 `FighterController` 字段。
+
+## 22. 一场战斗的完整运行调用链
+
+本节按实际执行顺序说明各文件如何互相引用。最核心的数据方向为：
+
+```text
+combat_catalog.json
+        ↓
+CombatCatalogData
+        ↓
+CombatInputCommand → CombatSimulation
+                         ├── CombatSnapshot → FighterController / HUD
+                         └── CombatEvent    → Audio / 其他一次性表现
+```
+
+### 22.1 启动与对象创建
+
+场景加载后由 `CombatBootstrap.BuildDemo()` 自动启动：
+
+```text
+CombatBootstrap.BuildDemo()
+    ├── CombatCatalogLoader.TryLoad()
+    │       ├── 读取 combat_catalog.json
+    │       ├── Validate()
+    │       └── CombatCatalogData.RebuildLookups()
+    ├── 创建 FighterController × 2
+    ├── 创建并初始化 CombatAudio
+    ├── 创建并初始化 CombatDirector
+    ├── 创建分屏摄像机 × 2
+    └── 创建并初始化 CombatHud
+```
+
+`CombatDirector.Initialize()` 根据两个角色的初始位置创建 `CombatSimulation`，获取第一份 `CombatSnapshot`，再把双方快照绑定到对应的 `FighterController`。
+
+### 22.2 每帧输入与固定逻辑步
+
+`CombatDirector.Update()` 每个 Unity 画面帧读取键盘并累计 `Time.deltaTime`。当累计时间达到：
+
+```text
+1 / settings.logicFrameRate
+```
+
+时执行一次固定逻辑步。攻击键先进入 `QueueAttack(playerIndex, actionId)`，随后在 `Simulate()` 中与移动轴一起转换为两个相同 Tick 的 `CombatInputCommand`。
+
+```text
+Keyboard
+    ↓
+CombatDirector.ReadInput()
+    ↓
+QueueAttack()
+    ↓
+CombatDirector.Simulate()
+    ↓
+CombatInputCommand P1 + CombatInputCommand P2
+    ↓
+CombatSimulation.Step()
+```
+
+键盘层不直接扣架势、修改角色模式或播放攻击动画。
+
+### 22.3 单个模拟 Tick 的顺序
+
+`CombatSimulation.Step()` 是权威战斗推进入口，严格按以下顺序执行：
+
+```text
+校验双方命令 Tick 和玩家编号
+    ↓
+ApplyCommand(P1 / P2)
+    ↓
+应用或缓冲攻击输入
+    ↓
+重新计算双方朝向
+    ↓
+AdvanceMovement()
+    ↓
+AdvanceFighter(P1 / P2)
+    ├── 输入缓冲计时
+    ├── 黄色延迟条递减
+    ├── 攻击逻辑帧推进
+    ├── Rebound / Hit 锁定推进
+    └── Free 状态架势恢复
+    ↓
+ResolveCombat()
+    ├── 动作对预测
+    ├── 有效期与攻击范围检查
+    ├── 动作对结算
+    └── 有效期结束后的普通命中结算
+    ↓
+CaptureSnapshot()
+```
+
+所有会改变战斗结果的规则都应在这个固定步骤中执行，不能分散到 HUD、动画或音频更新中。
+
+### 22.4 攻击启动与输入缓冲
+
+`ApplyCommand()` 收到攻击 ID 后调用 `SubmitAttack()`：
+
+```text
+角色为 Free
+    └── TryStartAttack()
+            ├── 查询 AttackDefinition
+            ├── 检查并扣除架势
+            ├── 确定左右挥剑方向
+            ├── 消耗剩余黄色延迟条
+            ├── 创建 AttackRuntime
+            ├── 进入 FighterMode.Attack
+            └── 发出 AttackStarted 事件
+
+角色不是 Free 或架势不足
+    └── 保存为 bufferedAction
+```
+
+缓冲只保留最新攻击。超过 `settings.inputBufferFrames` 后删除；恢复 Free 时会尝试执行仍然有效的缓冲输入。
+
+### 22.5 动作阶段与普通命中
+
+`AttackRuntime` 根据 `ElapsedFrames` 计算 `Windup`、`Active`、`Recovery` 和 `Finished`。普通命中不会在刚进入有效期时立即结算，而是在攻击离开有效期后由 `ResolveExpiredActiveWindow()` 确认。
+
+普通命中要求：
+
+- 本方有效期内目标曾在攻击范围；
+- 双方有效期完全没有时间重叠；
+- 本次攻击尚未由其他规则结算。
+
+目标仍处于前摇时比较双方 `startupPoise`：高韧性后手只扣血并继续动作；否则取消攻击、清空缓冲并进入 `Hit`。
+
+### 22.6 动作对与弹刀
+
+双方同时处于 `Active`、互相满足范围且攻击均未结算时，`ResolveActionPair()` 查询 JSON 中的无序动作对：
+
+```text
+CombatCatalogData.GetPair(P1Action, P2Action, out swapped)
+    ↓
+把 first / second 映射到实际玩家
+    ↓
+ApplyPairValues()
+    ├── 动作对伤害
+    └── 黄色延迟条
+    ↓
+ApplyPairResult()
+    ├── Continue：修改当前 AttackRuntime.RuntimeSpeed
+    └── Rebound：EnterRebound()
+```
+
+进入 `Rebound` 时，模拟层把以下内容写入 `FighterSnapshot`：
+
+- `lockedActionId`：产生弹刀的动作；
+- `lockedActionSide`：挥剑方向；
+- `lockedAnimationStartFrame`：动作对成立时的实际动画源帧；
+- `lockedElapsedFrames`：已经过的弹回锁定帧；
+- `lockedDurationFrames`：完整弹回锁定时长。
+
+当前动作对在有效期首次满足重叠时立即进入 `Rebound`。如果 `Blocked` 动画从举剑高点到武器接触的素材帧很少，即使接入姿势连续，视觉接触仍可能显得很快；此问题属于弹刀动画接触前、接触后时长分配，不应通过改变普通命中规则解决。
+
+### 22.7 快照、动画、HUD 与音效
+
+每个 Tick 完成后，`CombatDirector` 获取模拟快照和事件：
+
+```text
+CombatSnapshot
+    ├── PlayerOne.ApplySnapshot()
+    ├── PlayerTwo.ApplySnapshot()
+    └── CombatHud 读取公开状态
+
+CombatEvent[]
+    └── CombatDirector.ProcessEvents()
+            ├── ActionPairPredicted → CombatAudio.PlayActionPair()
+            └── NormalHit          → CombatAudio.PlayNormalHit()
+```
+
+`FighterController.ApplySnapshot()` 根据模式驱动表现：
+
+| 快照模式 | 表现入口 |
+|---|---|
+| `Free` | `PlayFreeAnimation()`，待机或移动 |
+| `Attack` | 使用 `AttackRuntime.SourceAnimationTime` 定位成功攻击动画 |
+| `Rebound` | `PlayRebound()`，根据锁定动作、方向、起播帧和时长播放 Blocked 动画 |
+| `Hit` | `PlayHit()`，按受击锁定时长调整受击动画 |
+
+动画、HUD 和音效都不是权威状态来源。动画缺失或音效播放失败不能改变模拟结果。
+
+### 22.8 AA 动作对示例
+
+```text
+双方按下 A
+    ↓
+CombatDirector 生成 P1/P2 输入命令
+    ↓
+CombatSimulation.TryStartAttack() × 2
+    ↓
+双方从 Windup 推进到 Active
+    ↓
+ResolveCombat() 检测有效期与范围重叠
+    ↓
+ResolveActionPair(A, A)
+    ↓
+双方根据 JSON 的 A+A 参与方数据进入 Rebound
+    ↓
+生成 CombatSnapshot 和 ActionPairResolved / Rebound 事件
+    ↓
+FighterController.PlayRebound() 播放双方 Blocked 动画
+    ↓
+lockedElapsedFrames 达到 lockedDurationFrames
+    ↓
+恢复 Free，并尝试执行仍有效的输入缓冲
+```
+
+### 22.9 状态所有权与修改入口
+
+| 要修改的内容 | 文件或模块 |
+|---|---|
+| 动作帧长、伤害、架势、范围和动作对数值 | `Assets/Resources/CombatData/combat_catalog.json` |
+| 新战斗判定、普通命中、韧性、动作对规则 | `CombatSimulation.cs` |
+| 输入命令、完整快照或网络同步字段 | `CombatProtocol.cs` |
+| 本地键盘映射、固定步调度和表现事件转发 | `CombatDirector.cs` |
+| 角色模型、位置、攻击、弹刀和受击动画表现 | `FighterController.cs` |
+| Playables 片段播放、混合和动画时间定位 | `FighterAnimationPlayer.cs` |
+| 音效序列与重叠播放 | `CombatAudio.cs` |
+| 血条、架势条、帮助页和临时数值面板 | `CombatHud.cs` |
+| 场景对象、摄像机和启动流程 | `CombatBootstrap.cs` |
+
+维护时应始终遵循：
+
+```text
+CombatSimulation 决定“发生什么”
+CombatSnapshot 保存“当前是什么状态”
+CombatEvent 描述“这个 Tick 刚发生什么”
+FighterController / HUD / Audio 决定“如何表现”
+```
